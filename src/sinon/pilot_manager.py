@@ -245,11 +245,12 @@ class PilotManager(attributes.Attributes):
         # and update the status accordingly.
         pilots = []
         for pilot_id, pilot_description in pilot_description_dict.iteritems():
-            # check wether pilot description defines the mandatory fields 
+            # check whether pilot description defines the mandatory fields
             resource_key = pilot_description['description'].resource
             number_cores = pilot_description['description'].cores
             run_time     = pilot_description['description'].run_time
             queue        = pilot_description['description'].queue
+            project      = pilot_description['description'].project
 
             try_submit = True
 
@@ -388,6 +389,12 @@ class PilotManager(attributes.Attributes):
                         jd.queue = queue
                     elif 'queue' in resource_cfg:
                         jd.queue = resource_cfg['queue']
+
+                    # process the 'project' attribute
+                    if project is not None:
+                        jd.project = project
+                    elif 'project' in resource_cfg:
+                        jd.project = resource_cfg['project']
 
                     # if resource config defines 'pre_bootstrap' commands,
                     # we add those to the argument list
