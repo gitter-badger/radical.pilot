@@ -341,11 +341,11 @@ class PilotManager(attributes.Attributes):
 
                     # Copy the bootstrap shell script
                     # This works for installed versions of saga-pilot
-                    bs_script = which('bootstrap-and-run-agent')
-                    if bs_script is None:
-                        bs_script = os.path.abspath("%s/../../../bin/bootstrap-and-run-agent" % os.path.dirname(os.path.abspath(__file__)))
+                    bs_path = which('bootstrap-and-run-agent')
+                    if bs_path is None:
+                        bs_path = os.path.abspath("%s/../../../bin/bootstrap-and-run-agent" % os.path.dirname(os.path.abspath(__file__)))
                     # This works for non-installed versions (i.e., python setup.py test)
-                    bs_script_url = saga.Url("file://localhost/%s" % bs_script) 
+                    bs_script_url = saga.Url("file://localhost/%s" % bs_path)
 
                     bs_script = saga.filesystem.File(bs_script_url)
                     bs_script.copy(agent_dir_url)
@@ -402,10 +402,13 @@ class PilotManager(attributes.Attributes):
                         for command in resource_cfg['pre_bootstrap']:
                             jd.arguments.append("-e \"%s\"" % command)
 
-                    # if resourc configuration defines a custom 'python_interpreter',
+                    # if resource configuration defines a custom 'python_interpreter',
                     # we add it to the argument list
                     if 'python_interpreter' in resource_cfg:
                         jd.arguments.append("-i %s" % resource_cfg['python_interpreter'])
+
+                    jd.file_transfer   = [ '%s > %s' % (bs_path, os.path.basename(bs_path)),
+                                           '%s > %s' % (agent_path, os.path.basename(agent_path)) ]
 
                     jd.output            = "STDOUT"
                     jd.error             = "STDERR"
