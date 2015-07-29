@@ -74,7 +74,7 @@ def run_test (cfg):
         pdesc.queue    = cfg['cp_queue']
         pdesc.runtime  = cfg['cp_runtime']
         pdesc.cores    = cfg['cp_cores']
-        pdesc.cleanup  = True
+        pdesc.cleanup  = False
 
         # submit the pilot.
         print "Submitting Compute Pilot to Pilot Manager ..."

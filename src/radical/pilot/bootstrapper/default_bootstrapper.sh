@@ -613,7 +613,8 @@ virtenv_activate()
         return
     fi
 
-    . "$virtenv/bin/activate"
+    #. "$virtenv/bin/activate"
+    . activate test_ve
     VIRTENV_IS_ACTIVATED=TRUE
 
     # make sure we use the new python binary
@@ -1271,7 +1272,8 @@ then
         PILOT_SCRIPT="$SANDBOX/rp_install/lib/python$python_version/site-packages/radical/pilot/agent/radical-pilot-agent-${AGENT_TYPE}.py"
     fi
 else
-    PILOT_SCRIPT="$VIRTENV/rp_install/bin/radical-pilot-agent-${AGENT_TYPE}.py"
+    #PILOT_SCRIPT="$VIRTENV/rp_install/bin/radical-pilot-agent-${AGENT_TYPE}.py"
+    PILOT_SCRIPT="/home/hpc/pr87be/di29sut/.conda/envs/test_ve/lib/python2.7/site-packages/radical/pilot/agent/radical-pilot-agent-${AGENT_TYPE}.py"
     if ! test -e "$PILOT_SCRIPT"
     then
         PILOT_SCRIPT="$VIRTENV/rp_install/lib/python$python_version/site-packages/radical/pilot/agent/radical-pilot-agent-${AGENT_TYPE}.py"
