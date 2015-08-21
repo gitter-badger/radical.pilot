@@ -78,10 +78,11 @@ class Pubsub(object):
 
         self._flavor  = flavor
         self._channel = channel
-        self._name    = channel
         self._role    = role
         self._addr    = ru.Url(address)
         self._debug   = False
+        self._logfd   = None
+        self._name    = "pubsub.%s.%s.%d" % (self._channel, self._role, os.getpid())
 
         if 'msg' in os.environ.get('RADICAL_DEBUG', '').lower():
             self._debug = True
@@ -102,6 +103,10 @@ class Pubsub(object):
                 % (channel, role, self._addr, os.getpid()))
 
     @property
+    def name(self):
+        return self._name
+
+    @property
     def channel(self):
         return self._channel
 
@@ -119,8 +124,10 @@ class Pubsub(object):
     def _log(self, msg):
 
         if self._debug:
-            with open("pubsub.%s.%s.%d.log" % (self._channel, self._role, os.getpid()), 'a') as f:
-                f.write("%15.5f: %-30s: %s\n" % (time.time(), self._name, msg))
+            if not self._logfd:
+                self._logfd = open("%s.log" % self.name, 'a')
+            self._logfd.write("%15.5f: %-30s: %s\n" % (time.time(), self._channel, msg))
+            self._logfd.flush()
 
 
     # --------------------------------------------------------------------------
@@ -231,61 +238,33 @@ class PubsubZMQ(Pubsub):
 
                 _out = ctx.socket(zmq.XPUB)
                 _out.bind(addr_out)
-                
+
+                _poll = zmq.Poller()
+                _poll.register(_in,  zmq.POLLIN)
+                _poll.register(_out, zmq.POLLIN)
+
                 while True:
 
-                    idle = True
+                    _socks = dict(_poll.poll(timeout=1000)) # timeout in ms
 
-                    if _in.poll (flags=zmq.POLLIN, timeout=0.01):
+                    if _in in _socks:
                         if _USE_MULTIPART:
                             msg = _in.recv_multipart(flags=zmq.NOBLOCK)
                             _out.send_multipart(msg)
                         else:
                             msg = _in.recv(flags=zmq.NOBLOCK)
                             _out.send(msg)
-                        idle = False
                       # self._log("-> %s" % msg)
 
 
-                    if _out.poll (flags=zmq.POLLIN, timeout=0.01):
+                    if _out in _socks:
                         if _USE_MULTIPART:
                             msg = _out.recv_multipart()
                             _in.send_multipart(msg)
                         else:
                             msg = _out.recv()
                             _in.send(msg)
-                        idle = False
                       # self._log("<- %s" % msg)
-
-                    if idle:
-                        time.sleep(0.01)
-
-
-              # _poll = zmq.Poller()
-              # _poll.register(_in,  zmq.POLLIN)
-              # _poll.register(_out, zmq.POLLIN)
-              #
-              # while True:
-              #
-              #     events = dict(_poll.poll(1000)) # timeout in ms
-              #
-              #     if _in in events:
-              #         if _USE_MULTIPART:
-              #             msg = _in.recv_multipart()
-              #             _out.send_multipart(msg)
-              #         else:
-              #             msg = _in.recv()
-              #             _out.send(msg)
-              #         self._log("-> %s" % msg)
-              #
-              #     if _out in events:
-              #         if _USE_MULTIPART:
-              #             msg = _out.recv_multipart()
-              #             _in.send_multipart(msg)
-              #         else:
-              #             msg = _out.recv()
-              #             _in.send(msg)
-              #         self._log("<- %s" % msg)
             # ------------------------------------------------------------------
 
             addr_in  = str(self._addr)
@@ -347,9 +326,8 @@ class PubsubZMQ(Pubsub):
             self._q.send_multipart ([topic, data])
 
         else:
-            msg = "%s %s" % (topic, data)
-          # self._log("-> %s" % msg)
-            self._q.send (msg)
+          # self._log("-> %s %s" % (topic, data))
+            self._q.send ("%s %s" % (topic, data))
 
 
     # --------------------------------------------------------------------------
@@ -363,17 +341,8 @@ class PubsubZMQ(Pubsub):
             topic, data = self._q.recv_multipart()
 
         else:
-          # raw = self._q.recv()
-          # topic, data = raw.split(' ', 1)
-
-            while True:
-                if self._q.poll (flags=zmq.POLLIN, timeout=0.01):
-                    if _USE_MULTIPART:
-                        raw = self._q.recv_multipart(flags=zmq.NOBLOCK)
-                    else:
-                        raw = self._q.recv(flags=zmq.NOBLOCK)
-                    topic, data = raw.split(' ', 1)
-                    break
+            raw = self._q.recv()
+            topic, data = raw.split(' ', 1)
 
         msg = json.loads(data)
       # self._log("<- %s" % str([topic, pprint.pformat(msg)]))
@@ -382,7 +351,7 @@ class PubsubZMQ(Pubsub):
 
     # --------------------------------------------------------------------------
     #
-    def get_nowait(self, timeout=None):
+    def get_nowait(self, timeout=None): # timeout in ms
 
         if not self._role == PUBSUB_SUB:
             raise RuntimeError("channel %s (%s) can't get_nowait()" % (self._channel, self._role))

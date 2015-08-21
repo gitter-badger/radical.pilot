@@ -327,7 +327,7 @@ def pilot_FAILED(mongo_p=None, pilot_uid=None, logger=None, msg=None):
 
 # ------------------------------------------------------------------------------
 #
-def pilot_CANCELED(mongo_p, pilot_uid, logger, msg):
+def pilot_CANCELED(mongo_p=None, pilot_uid=None, logger=None, msg=None):
 
     if logger:
         logger.warning(msg)
@@ -372,7 +372,7 @@ def pilot_CANCELED(mongo_p, pilot_uid, logger, msg):
 
 # ------------------------------------------------------------------------------
 #
-def pilot_DONE(mongo_p, pilot_uid):
+def pilot_DONE(mongo_p=None, pilot_uid=None, logger=None, msg=None):
 
     if mongo_p and pilot_uid:
 
@@ -1169,7 +1169,7 @@ class LaunchMethod(object):
         # TODO: This doesn't make too much sense for LM's that use multiple
         #       commands, perhaps this needs to move to per LM __init__.
         if self.launch_command is None:
-            raise RuntimeError("Launch command not found for LaunchMethod '%s'" % name)
+            raise RuntimeError("Launch command not found for LaunchMethod '%s'" % self.name)
 
         logger.info("Discovered launch command: '%s'.", self.launch_command)
 
@@ -1922,25 +1922,12 @@ class LaunchMethodORTE(LaunchMethod):
             raise Exception("Couldn't find (g)stdbuf")
         stdbuf_arg = "-oL"
 
-        # Reserve compute nodes to offload agent too
-        reserved_size = 1 # TODO: make configurable
-        vm_size = len(lrms.node_list) - reserved_size
-        lrms.reserved_nodes = sorted(lrms.node_list)[-reserved_size:]
-        logger.info("Reserving nodes: %s" % lrms.reserved_nodes)
-
-      # # Mark the reserved node slots BUSY
-      # # NOTE: we don't need that anymore, as the nodelist is manipulated on
-      # LRMS level, before it reaches the scheduler
-      # for node in self._scheduler.reserved_nodes:
-      #     slots = []
-      #     for c in range(32):
-      #         slots.append('%s:%d' % (node, c))
-      #     self._scheduler._change_slot_states(slots, BUSY)
+        vm_size = len(lrms.node_list)
 
         logger.info("Starting ORTE DVM on %d nodes ..." % vm_size)
 
         dvm_process = subprocess.Popen(
-            [stdbuf_cmd, stdbuf_arg, dvm_command,
+            [stdbuf_cmd, stdbuf_arg, dvm_command, '--debug-devel',
              '--mca', 'orte_max_vm_size', str(vm_size)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
@@ -1954,16 +1941,16 @@ class LaunchMethodORTE(LaunchMethod):
                 if len(line.split(' ')) != 2:
                     raise Exception("Unknown VMURI format: %s" % line)
 
-                label, dvmuri = line.split(' ', 1)
+                label, dvm_uri = line.split(' ', 1)
 
                 if label != 'VMURI:':
                     raise Exception("Unknown VMURI format: %s" % line)
 
-                logger.info("ORTE DVM URI: %s" % dvmuri)
+                logger.info("ORTE DVM URI: %s" % dvm_uri)
 
             elif line == 'DVM ready':
 
-                if not dvmuri:
+                if not dvm_uri:
                     raise Exception("VMURI not found!")
 
                 logger.info("ORTE DVM startup successful!")
@@ -1979,10 +1966,30 @@ class LaunchMethodORTE(LaunchMethod):
                     # Process is gone: fatal!
                     raise Exception("ORTE DVM process disappeared")
 
+        #######################################################################
+        #
+        def _watch_dvm(dvm_process):
+
+            logger.info('starting DVM watcher')
+
+            while dvm_process.poll() is None:
+                line = dvm_process.stdout.readline().strip()
+                if line:
+                    logger.debug('dvm output: %s' % line)
+                else:
+                    time.sleep(1.0)
+
+            logger.info('DVM stopped (%d)' % dvm_process.returncode)
+            # TODO: Tear down everything?
+
+        dvm_watcher = threading.Thread(target=_watch_dvm, args=(dvm_process,), name="DVMWatcher")
+        dvm_watcher.start()
+
+        lm_info = {'dvm_uri': dvm_uri}
+
         # we need to inform the actual LM instance about the DVM URI.  So we
         # pass it back to the LRMS which will keep it in an 'lm_info', which
         # will then be passed as part of the opaque_slots via the scheduler
-        lm_info = {'dvmuri' : dvmuri}
         return lm_info
 
     # TODO: Create teardown() function for LaunchMethod's (in this case to terminate the dvm)
@@ -2001,15 +2008,20 @@ class LaunchMethodORTE(LaunchMethod):
     def construct_command(self, task_exec, task_args, task_numcores,
                           launch_script_hop, opaque_slots):
 
-        if  'task_slots' not in opaque_slots or \
-            'dvm_url'    not in opaque_slots or \
-            'lm_info'    not in opaque_slots :
-            raise RuntimeError('insufficient information to launch via %s: %s' \
+        if 'task_slots' not in opaque_slots:
+            raise RuntimeError('No task_slots to launch via %s: %s' \
+                               % (self.name, opaque_slots))
+
+        if 'lm_info' not in opaque_slots:
+            raise RuntimeError('No lm_info to launch via %s: %s' \
                     % (self.name, opaque_slots))
 
-        if  not opaque_slots['lm_info'] or \
-            'dvmuri' not in opaque_slots['lm_info'] :
+        if not opaque_slots['lm_info']:
             raise RuntimeError('lm_info missing for %s: %s' \
+                               % (self.name, opaque_slots))
+
+        if 'dvm_uri' not in opaque_slots['lm_info']:
+            raise RuntimeError('dvm_uri not in lm_info for %s: %s' \
                     % (self.name, opaque_slots))
 
         task_slots = opaque_slots['task_slots']
@@ -2170,9 +2182,8 @@ class LRMS(object):
             else :
                 raise ValueError("ill-formatted agent target '%s'" % target)
 
-
         # we are good to get rolling, and to detect the runtime environment of
-        # the local LRMS.
+        # the local LRMS
         self._configure()
         logger.info("Discovered execution environment: %s", self.node_list)
 
@@ -2184,10 +2195,10 @@ class LRMS(object):
 
         # check if the LRMS implementation reserved agent nodes.  If not, pick
         # the first couple of nodes from the nodelist as a fallback
-        if len(self._agent_reqs) and not self.agent_nodes:
+        if len(self._agent_reqs):
             self._log.info('use fallback to determine set of agent nodes')
             for ar in self._agent_reqs:
-                self.agent_nodes[ar] = self.node_list.pop(0)
+                self.agent_nodes[ar] = self.node_list.pop()
                 if not self.node_list:
                     break
 
@@ -2209,15 +2220,21 @@ class LRMS(object):
 
         for lm in launch_methods:
             if lm:
-                ru.dict_merge(self.lm_info,
-                        LaunchMethod.lrms_config_hook(lm, self._cfg, self, self._log))
+                try:
+                    ru.dict_merge(self.lm_info,
+                            LaunchMethod.lrms_config_hook(lm, self._cfg, self, self._log))
+                except Exception as e:
+                    self._log.exception("lrms config hook failed")
+                    raise
+
+                self._log.exception("lrms config hook succeeded (%s)" % lm)
 
         # For now assume that all nodes have equal amount of cores
         cores_avail = len(self.node_list) * self.cores_per_node
         if 'RADICAL_PILOT_PROFILE' not in os.environ:
-            if cores_avail < int(requested_cores):
+            if cores_avail < int(self.requested_cores):
                 raise ValueError("Not enough cores available (%s) to satisfy allocation request (%s)." \
-                                % (str(cores_avail), str(requested_cores)))
+                                % (str(cores_avail), str(self.requested_cores)))
 
 
     # --------------------------------------------------------------------------
@@ -2290,7 +2307,7 @@ class LRMS(object):
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.setblocking(False)
                 s.settimeout(1.0)
-                s.connect(('8.8.8.8', 0))
+                s.connect(('8.8.8.8', 53))
                 return s.getsockname()[0]
             except Exception as e:
                 if logger:
@@ -2299,10 +2316,7 @@ class LRMS(object):
             # if that did not work, fall back to the normal lookup for localhost
             host = LRMS.hostname()
 
-        # a hostis given, or is localhost now -- look it up.
-        # FIXME: Temporary hack because nodefile on Cray doesn't have actual hostnames
-        if True:
-            host = 'nid%.5d' % int(host)
+        # a host is given, or is localhost now -- look it up.
 
         # FIXME: move to ru?
         if hasattr(socket, 'setdefaulttimeout'):
@@ -3513,9 +3527,12 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
         self.declare_publisher('unschedule', rp.AGENT_UNSCHEDULE_PUBSUB)
         self.declare_publisher('state',      rp.AGENT_STATE_PUBSUB)
 
-        self._cus_to_watch   = list()
+        self.declare_subscriber('command',   rp.AGENT_COMMAND_PUBSUB, self.command_cb)
+
+        self._cancel_lock    = threading.RLock()
         self._cus_to_cancel  = list()
-        self._watch_queue    = queue.Queue ()
+        self._cus_to_watch   = list()
+        self._watch_queue    = Queue.Queue ()
         self._cu_environment = self._populate_cu_environment()
 
         # run watcher thread
@@ -3543,6 +3560,23 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
         # terminate watcher thread
         self._terminate.set()
         self._watcher.join()
+
+
+    # --------------------------------------------------------------------------
+    #
+    def command_cb(self, topic, msg):
+
+        cmd = msg['cmd']
+        arg = msg['arg']
+
+        if cmd == 'cancel_unit':
+
+            self._log.info("cancel unit command (%s)" % arg)
+            with self._cancel_lock:
+                self._cus_to_cancel.append(arg)
+
+        else:
+            self._log.info("ignored command '%s'" % msg)
 
 
     # --------------------------------------------------------------------------
@@ -3745,25 +3779,13 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
 
         self._prof.prof('run')
         try:
+            self._log = ru.get_logger('%s.Watcher' % self.name, 
+                                      target="%s.Watcher.log" % self.name,
+                                      level='DEBUG') # FIXME?
 
             while not self._terminate.is_set():
 
                 cus = list()
-
-                # See if there are cancel requests, or new units to watch
-                try:
-                    command = self._command_queue.get_nowait()
-                    self._prof.prof('get_cmd', msg="command_queue to ExecWatcher (%s)" % command[COMMAND_TYPE])
-
-                    if command[COMMAND_TYPE] == COMMAND_CANCEL_COMPUTE_UNIT:
-                        self._cus_to_cancel.append(command[COMMAND_ARG])
-                    else:
-                        raise RuntimeError("Command %s not applicable in this context." %
-                                           command[COMMAND_TYPE])
-
-                except Queue.Empty:
-                    # do nothing if we don't have any queued commands
-                    pass
 
                 try:
 
@@ -3794,10 +3816,11 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
 
                 if not action and not cus :
                     # nothing happend at all!  Zzz for a bit.
-                    time.sleep(self._cfg['queue_poll_sleeptime'])
+                    time.sleep(self._cfg['db_poll_sleeptime'])
 
         except Exception as e:
             self._log.exception("Error in ExecWorker watch loop (%s)" % e)
+            # FIXME: this should signal the ExecWorker for shutdown...
 
         self._prof.prof ('stop')
 
@@ -3827,10 +3850,12 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
                     # We got a request to cancel this cu
                     action += 1
                     cu['proc'].kill()
-                    self._cus_to_cancel.remove(cu['_id'])
+                    with self._cancel_lock:
+                        self._cus_to_cancel.remove(cu['_id'])
 
                     self._prof.prof('final', msg="execution canceled", uid=cu['_id'])
 
+                    del(cu['proc'])  # proc is not json serializable
                     self.publish('unschedule', cu)
                     self.advance(cu, rp.CANCELED, publish=True, push=False)
 
@@ -3846,6 +3871,7 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
 
                 # Free the Slots, Flee the Flots, Ree the Frots!
                 self._cus_to_watch.remove(cu)
+                del(cu['proc'])  # proc is not json serializable
                 self.publish('unschedule', cu)
 
                 if os.path.isfile("%s/PROF" % cu['workdir']):
@@ -3900,6 +3926,8 @@ class ExecWorker_SHELL(AgentExecutingComponent):
         self.declare_publisher('unschedule', rp.AGENT_UNSCHEDULE_PUBSUB)
         self.declare_publisher('state',      rp.AGENT_STATE_PUBSUB)
 
+        self.declare_subscriber('command',   rp.AGENT_COMMAND_PUBSUB, self.command_cb)
+
         # Mimic what virtualenv's "deactivate" would do
         self._deactivate = "# deactivate pilot virtualenv\n"
 
@@ -3929,6 +3957,9 @@ class ExecWorker_SHELL(AgentExecutingComponent):
         self._registry      = dict()
         self._registry_lock = threading.RLock()
 
+        self._cus_to_cancel  = list()
+        self._cancel_lock    = threading.RLock()
+
         self._cached_events = list() # keep monitoring events for pid's which
                                      # are not yet known
 
@@ -3938,10 +3969,10 @@ class ExecWorker_SHELL(AgentExecutingComponent):
         self.monitor_shell  = sups.PTYShell ("fork://localhost/")
 
         # run the spawner on the shells
-        tmp = tempfile.gettempdir()
+        # tmp = tempfile.gettempdir()
         # Moving back to shared file system again, until it reaches maturity,
         # as this breaks launch methods with a hop, e.g. ssh.
-        # tmp = os.getcwd() # FIXME: see #658
+        tmp = os.getcwd() # FIXME: see #658
         pilot_id = self._cfg['pilot_id']
         ret, out, _  = self.launcher_shell.run_sync \
                            ("/bin/sh %s/agent/radical-pilot-spawner.sh /%s/%s-%s" \
@@ -3993,7 +4024,66 @@ class ExecWorker_SHELL(AgentExecutingComponent):
 
     # --------------------------------------------------------------------------
     #
+    def command_cb(self, topic, msg):
+
+        cmd = msg['cmd']
+        arg = msg['arg']
+
+        if cmd == 'cancel_unit':
+
+            self._log.info("cancel unit command (%s)" % arg)
+            with self._cancel_lock:
+                self._cus_to_cancel.append(arg)
+
+        else:
+            self._log.info("ignored command '%s'" % msg)
+
+
+    # --------------------------------------------------------------------------
+    #
     def work(self, cu):
+
+        # check that we don't start any units which need cancelling
+        if cu['_id'] in self._cus_to_cancel:
+
+            with self._cancel_lock:
+                self._cus_to_cancel.remove(cu['_id'])
+
+            self.publish('unschedule', cu)
+            self.advance(cu, rp.CANCELED, publish=True, push=False)
+            return True
+
+        # otherwise, check if we have any active units to cancel
+        # FIXME: this should probably go into a separate idle callback
+        if self._cus_to_cancel:
+
+            # NOTE: cu cancellation is costly: we keep a potentially long list
+            # of cancel candidates, perform one inversion and n lookups on the
+            # registry, and lock the registry for that complete time span...
+
+            with self._registry_lock :
+                # inverse registry for quick lookups:
+                inv_registry = {v: k for k, v in self._registry.items()}
+
+                for cu_uid in self._cus_to_cancel:
+                    pid = inv_registry.get(cu_uid)
+                    if pid:
+                        # we own that cu, cancel it!
+                        ret, out, _ = self.launcher_shell.run_sync ('CANCEL %s\n' % pid)
+                        if  ret != 0 :
+                            self._log.error ("failed to cancel unit '%s': (%s)(%s)" \
+                                            , (cu_uid, ret, out))
+                        # successful or not, we only try once
+                        del(self._registry[pid])
+
+                        with self._cancel_lock:
+                            self._cus_to_cancel.remove(cu_uid)
+
+            # The state advance will be managed by the watcher, which will pick
+            # up the cancel notification.  
+            # FIXME: We could optimize a little by publishing the unschedule
+            #        right here...
+
 
       # self.advance(cu, rp.AGENT_EXECUTING, publish=True, push=False)
         self.advance(cu, rp.EXECUTING, publish=True, push=False)
@@ -4200,8 +4290,6 @@ timestamp () {
         # 'BULK COMPLETED message from lrun
         ret, out = self.launcher_shell.find_prompt ()
         if  ret != 0 :
-            with self._registry_lock :
-                del(self._registry[uid])
             raise RuntimeError ("failed to run unit '%s': (%s)(%s)" \
                              % (run_cmd, ret, out))
 
@@ -4224,7 +4312,9 @@ timestamp () {
 
         self._prof.prof('run')
         try:
-
+            self._log = ru.get_logger('%s.Watcher' % self.name, 
+                                      target="%s.Watcher.log" % self.name,
+                                      level='DEBUG') # FIXME?
             self.monitor_shell.run_async ("MONITOR")
 
             while not self._terminate.is_set () :
@@ -4291,7 +4381,10 @@ timestamp () {
                     self._log.warn ("monitoring channel noise: %s", line)
 
                 else :
-                    pid, state, data = line.split (':', 2)
+                    elems = line.split (':', 2)
+                    if len(elems) != 3:
+                        raise ValueError("parse error for (%s)", line)
+                    pid, state, data = elems
 
                     # we are not interested in non-final state information, at
                     # the moment
@@ -4313,7 +4406,7 @@ timestamp () {
 
         except Exception as e:
 
-            self._log.error ("Exception in job monitoring thread: %s", e)
+            self._log.exception("Exception in job monitoring thread: %s", e)
             self._terminate.set()
 
         self._prof.prof ('stop')
@@ -4844,7 +4937,8 @@ class AgentHeartbeatWorker(rpu.Worker):
 
         except Exception as e:
             self._log.exception('heartbeat died - cancel')
-            self.publish('command', 'cancel')
+            self.publish('command', {'cmd' : 'shutdown', 
+                                     'arg' : 'exception'})
 
 
     # --------------------------------------------------------------------------
@@ -4881,7 +4975,7 @@ class AgentHeartbeatWorker(rpu.Worker):
             elif cmd == COMMAND_KEEP_ALIVE:
                 self._log.info('keepalive pilot cmd')
                 self.publish('command', {'cmd' : 'heartbeat', 
-                                         'msg' : 'keepalive'})
+                                         'arg' : 'keepalive'})
 
             else:
                 self._log.error("Received unknown command: %s with arg: %s.", cmd, arg)
@@ -4896,7 +4990,7 @@ class AgentHeartbeatWorker(rpu.Worker):
         if time.time() >= self._starttime + (int(self._runtime) * 60):
             self._log.info("Agent has reached runtime limit of %s seconds.", self._runtime*60)
             self.publish('command', {'cmd' : 'shutdown', 
-                                     'msg' : 'timeout'})
+                                     'arg' : 'timeout'})
 
 
 
@@ -5024,7 +5118,7 @@ class AgentWorker(rpu.Worker):
         # the pulling agent registers the staging_input_queue as this is what we want to push to
         # FIXME: do a sanity check on the config that only one agent pulls, as
         #        this is a non-atomic operation at this point
-        self._log.debug('pull units: %s' % self._pull_units)
+        self._log.debug('agent will pull units: %s' % bool(self._pull_units))
         if self._pull_units:
 
             self.declare_output(rp.AGENT_STAGING_INPUT_PENDING, rp.AGENT_STAGING_INPUT_QUEUE)
@@ -5085,7 +5179,7 @@ class AgentWorker(rpu.Worker):
                         launch_script_hop='/usr/bin/env RP_SPAWNER_HOP=TRUE "$0"',
                         opaque_slots=opaque_slots)
 
-            # spawn the SA
+            # spawn the sub-agent
             self._prof.prof("create", msg=sa)
             self._log.info ("create sub-agent %s: %s" % (sa, cmd))
             sa_out = open("%s.out" % sa, "w")
@@ -5109,7 +5203,7 @@ class AgentWorker(rpu.Worker):
         (DONE).  Once all units are accounted for, it will tear down all created
         objects.
 
-        The agent accepts a config, which will specifcy in an agent_layout
+        The agent accepts a config, which will specify in an agent_layout
         section:
           - what nodes should be used for sub-agent startup
           - what bridges should be started
@@ -5119,7 +5213,7 @@ class AgentWorker(rpu.Worker):
         Before starting any sub-agent or component, the agent master (agent.0)
         will collect information about the nodes required for all instances.
         That is added to the config itself, for the benefit of the LRMS
-        initizialization which is expected to block those nodes from the
+        initialisation which is expected to block those nodes from the
         scheduler.
         """
 
@@ -5275,7 +5369,7 @@ def bootstrap_3():
 
     # set up a logger and profiler
     prof = rpu.Profiler('bootstrap_3')
-    log  = ru.get_logger('bootstrap_3', 'bootstrap_3.log')
+    log  = ru.get_logger('bootstrap_3', 'bootstrap_3.log', 'DEBUG')  # FIXME?
     log.info('start')
 
     # FIXME: signal handlers need mongo_p, but we won't have that until later

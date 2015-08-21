@@ -128,6 +128,7 @@ class Component(mp.Process):
         """
 
         self._cfg         = cfg
+        self._debug       = cfg.get('debug', 'DEBUG') # FIXME?
         self._agent_name  = cfg['agent_name']
         self._cname       = "%s.%s.%d" % (self._agent_name, type(self).__name__, cfg.get('number', 0))
         self._addr_map    = cfg['bridge_addresses']
@@ -144,7 +145,7 @@ class Component(mp.Process):
         # use agent_name for one log per agent, cname for one log per agent and component
         log_name = self._cname
         log_tgt  = self._cname + ".log"
-        self._log = ru.get_logger(log_name, log_tgt)
+        self._log = ru.get_logger(log_name, log_tgt, self._debug)
         self._log.info('creating %s' % self._cname)
 
         self._prof = Profiler(self._cname)
@@ -153,6 +154,13 @@ class Component(mp.Process):
         # component will basically detach itself from the parent process, and
         # will only maintain a handle to be used for shutdown
         mp.Process.__init__(self, name=self._cname)
+
+
+    # --------------------------------------------------------------------------
+    #
+    @property
+    def cname(self):
+        return self._cname
 
 
     # --------------------------------------------------------------------------
@@ -300,15 +308,16 @@ class Component(mp.Process):
         if not isinstance(states, list):
             states = [states]
 
-        self._log.debug('%s declares input     : %s : %s' \
-                % (self._cname, states, input))
-
         # check if a remote address is configured for the queue
         addr = self._addr_map.get (input)
         self._log.debug("using addr %s for input %s" % (addr, input))
 
         q = rpu_Queue.create(rpu_QUEUE_ZMQ, input, rpu_QUEUE_OUTPUT, addr)
         self._inputs.append([q, states])
+
+        for state in states:
+            self._log.debug('declared input     : %s : %s : %s' \
+                    % (state, input, q.name))
 
 
     # --------------------------------------------------------------------------
@@ -331,9 +340,6 @@ class Component(mp.Process):
         if not isinstance(states, list):
             states = [states]
 
-        self._log.debug('%s declares output    : %s : %s' \
-                % (self._cname, states, output))
-
         for state in states:
 
             # we want a *unique* output queue for each state.
@@ -350,8 +356,11 @@ class Component(mp.Process):
                 self._log.debug("using addr %s for output %s" % (addr, output))
 
                 # non-final state, ie. we want a queue to push to
-                self._outputs[state] = \
-                        rpu_Queue.create(rpu_QUEUE_ZMQ, output, rpu_QUEUE_INPUT, addr)
+                q = rpu_Queue.create(rpu_QUEUE_ZMQ, output, rpu_QUEUE_INPUT, addr)
+                self._outputs[state] = q
+
+                self._log.debug('declared output    : %s : %s : %s' \
+                     % (state, output, q.name))
 
 
     # --------------------------------------------------------------------------
@@ -373,9 +382,6 @@ class Component(mp.Process):
         if not isinstance(states, list):
             states = [states]
 
-        self._log.debug('%s declares worker    : %s : %s' \
-                % (self._cname, states, worker))
-
         # we want exactly one worker associated with a state -- but a worker can
         # be responsible for multiple states
         for state in states:
@@ -384,18 +390,25 @@ class Component(mp.Process):
                         % (self._cname, state, self._workers[state]))
             self._workers[state] = worker
 
+            self._log.debug('declared worker    : %s : %s' \
+                    % (state, worker.__name__))
+
+
 
     # --------------------------------------------------------------------------
     #
     def declare_idle_cb(self, cb, timeout=0.0):
 
-        self._log.debug('%s declares idler     : %s : %s' \
-                % (self._cname, cb, timeout))
+        if None == timeout:
+            timeout = 0.0
+        timeout = float(timeout)
 
         self._idlers.append({
             'cb'      : cb,       # call this whenever we are idle
             'last'    : 0.0,      # was never called before
             'timeout' : timeout}) # call no more often than this many seconds
+
+        self._log.debug('declared idler     : %s : %s' % (cb.__name__, timeout))
 
 
     # --------------------------------------------------------------------------
@@ -413,15 +426,15 @@ class Component(mp.Process):
         if topic not in self._publishers:
             self._publishers[topic] = list()
 
-        self._log.debug('%s declares publisher : %s : %s' \
-                % (self._cname, topic, pubsub))
-
         # check if a remote address is configured for the queue
         addr = self._addr_map.get (pubsub)
         self._log.debug("using addr %s for pubsub %s" % (addr, pubsub))
 
         q = rpu_Pubsub.create(rpu_PUBSUB_ZMQ, pubsub, rpu_PUBSUB_PUB, addr)
         self._publishers[topic].append(q)
+
+        self._log.debug('declared publisher : %s : %s : %s' \
+                % (topic, pubsub, q.name))
 
 
     # --------------------------------------------------------------------------
@@ -444,21 +457,25 @@ class Component(mp.Process):
         # ----------------------------------------------------------------------
         def _subscriber(q, callback):
             while not self._terminate.is_set():
-                topic, msg = q.get_nowait(0.1) # FIXME timout
+                topic, msg = q.get_nowait(1000) # timout in ms
                 if topic and msg:
                     callback (topic=topic, msg=msg)
         # ----------------------------------------------------------------------
 
-        self._log.debug('%s declares subscriber: %s : %s : %s' \
-                % (self._cname, topic, pubsub, cb))
+        # check if a remote address is configured for the queue
+        addr = self._addr_map.get (pubsub)
+        self._log.debug("using addr %s for pubsub %s" % (addr, pubsub))
 
         # create a pubsub subscriber, and subscribe to the given topic
-        q = rpu_Pubsub.create(rpu_PUBSUB_ZMQ, pubsub, rpu_PUBSUB_SUB)
+        q = rpu_Pubsub.create(rpu_PUBSUB_ZMQ, pubsub, rpu_PUBSUB_SUB, addr)
         q.subscribe(topic)
 
         t = mt.Thread (target=_subscriber, args=[q,cb])
         t.start()
         self._threads.append(t)
+
+        self._log.debug('%s declared subscriber: %s : %s : %s : %s' \
+                % (self._cname, topic, pubsub, cb, t.name))
 
 
     # --------------------------------------------------------------------------
@@ -478,7 +495,7 @@ class Component(mp.Process):
         # configure the component's logger
         log_name = self._cname
         log_tgt  = self._cname + ".log"
-        self._log = ru.get_logger(log_name, log_tgt)
+        self._log = ru.get_logger(log_name, log_tgt, self._debug)
         self._log.info('running %s' % self._cname)
 
         # registering a sigterm handler will allow us to call an exit when the
@@ -523,7 +540,7 @@ class Component(mp.Process):
 
                     # FIXME: the timeouts have a large effect on throughput, but
                     #        I am not yet sure how best to set them...
-                    unit = input.get_nowait(0.1) # FIXME: timeout
+                    unit = input.get_nowait(1000) # timeout
                     if not unit:
                         continue
 

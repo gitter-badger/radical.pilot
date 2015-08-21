@@ -119,7 +119,7 @@ def _get_addr(name, role):
 # are mostly useful for the zmq queue.
 #
 class _QueueRegistry(object):
-    
+
     __metaclass__ = ru.Singleton
 
     def __init__(self):
@@ -136,7 +136,7 @@ class _QueueRegistry(object):
             raise ValueError("no such type '%s'" % flavor)
 
         with self._lock:
-            
+
             if name in self._registry[flavor]:
                 # queue instance for that name exists - return it
               # print 'found queue for %s %s' % (flavor, name)
@@ -159,19 +159,21 @@ class Queue(object):
     """
     This is really just the queue interface we want to implement
     """
-    def __init__(self, flavor, name, role, address=None):
+    def __init__(self, flavor, qname, role, address=None):
 
         self._flavor = flavor
-        self._name   = name
+        self._qname  = qname
         self._role   = role
         self._addr   = ru.Url(address)
         self._debug  = False
+        self._logfd  = None
+        self._name   = "queue.%s.%s.%d" % (self._qname, self._role, os.getpid())
 
         if 'msg' in os.environ.get('RADICAL_DEBUG', '').lower():
             self._debug = True
 
         # sanity check on address
-        default_addr = ru.Url(_get_addr(name, role))
+        default_addr = ru.Url(_get_addr(qname, role))
 
         # we replace only empty parts of the addr with default values
         if not self._addr       : self._addr        = default_addr
@@ -180,15 +182,19 @@ class Queue(object):
         if not self._addr.port  : self._addr.port   = default_addr.port
 
         if not self._addr:
-            raise RuntimeError("no default address found for '%s'" % self._channel)
+            raise RuntimeError("no default address found for '%s'" % self._qname)
 
         if role in [QUEUE_INPUT, QUEUE_OUTPUT]:
             self._log ("create %s - %s - %s - %s - %d" \
-                    % (flavor, name, role, address, os.getpid()))
+                    % (flavor, qname, role, address, os.getpid()))
 
     @property
     def name(self):
         return self._name
+
+    @property
+    def qname(self):
+        return self._qname
 
     @property
     def flavor(self):
@@ -207,8 +213,10 @@ class Queue(object):
     def _log(self, msg):
 
         if self._debug:
-            with open("queue.%s.%s.%d.log" % (self._name, self._role, os.getpid()), 'a') as f:
-                f.write("%15.5f: %-30s: %s\n" % (time.time(), self._name, msg))
+            if not self._logfd:
+                self._logfd = open("%s.log" % self._name, 'a')
+            self._logfd.write("%15.5f: %-30s: %s\n" % (time.time(), self._qname, msg))
+            self._logfd.flush()
 
 
     # --------------------------------------------------------------------------
@@ -273,7 +281,7 @@ class QueueThread(Queue):
     def put(self, msg):
 
         if not self._role == QUEUE_INPUT:
-            raise RuntimeError("queue %s (%s) can't put()" % (self._name, self._role))
+            raise RuntimeError("queue %s (%s) can't put()" % (self._qname, self._role))
 
         self._q.put(msg)
 
@@ -283,7 +291,7 @@ class QueueThread(Queue):
     def get(self):
 
         if not self._role == QUEUE_OUTPUT:
-            raise RuntimeError("queue %s (%s) can't get()" % (self._name, self._role))
+            raise RuntimeError("queue %s (%s) can't get()" % (self._qname, self._role))
 
         return self._q.get()
 
@@ -293,7 +301,7 @@ class QueueThread(Queue):
     def get_nowait(self):
 
         if not self._role == QUEUE_OUTPUT:
-            raise RuntimeError("queue %s (%s) can't get_nowait()" % (self._name, self._role))
+            raise RuntimeError("queue %s (%s) can't get_nowait()" % (self._qname, self._role))
 
         try:
             return self._q.get_nowait()
@@ -316,7 +324,7 @@ class QueueProcess(Queue):
     def put(self, msg):
 
         if not self._role == QUEUE_INPUT:
-            raise RuntimeError("queue %s (%s) can't put()" % (self._name, self._role))
+            raise RuntimeError("queue %s (%s) can't put()" % (self._qname, self._role))
 
         self._q.put(msg)
 
@@ -326,7 +334,7 @@ class QueueProcess(Queue):
     def get(self):
 
         if not self._role == QUEUE_OUTPUT:
-            raise RuntimeError("queue %s (%s) can't get()" % (self._name, self._role))
+            raise RuntimeError("queue %s (%s) can't get()" % (self._qname, self._role))
 
         return self._q.get()
 
@@ -336,7 +344,7 @@ class QueueProcess(Queue):
     def get_nowait(self):
 
         if not self._role == QUEUE_OUTPUT:
-            raise RuntimeError("queue %s (%s) can't get_nowait()" % (self._name, self._role))
+            raise RuntimeError("queue %s (%s) can't get_nowait()" % (self._qname, self._role))
 
         try:
             return self._q.get_nowait()
@@ -367,7 +375,7 @@ class QueueZMQ(Queue):
 
         All component will specify the same address.  Addresses are of the form
         'tcp://ip-number:port'.  
-        
+
         Note that the address is both used for binding and connecting -- so if
         any component lives on a remote host, all components need to use
         a publicly visible ip number, ie. not '127.0.0.1/localhost'.  The
@@ -398,7 +406,7 @@ class QueueZMQ(Queue):
             if self._addr.host == '*':
                 self._addr.host = '127.0.0.1'
 
-        self._log('%s/%s uses addr %s' % (self._name, self._role, self._addr))
+        self._log('%s/%s uses addr %s' % (self._qname, self._role, self._addr))
 
 
         # ----------------------------------------------------------------------
@@ -438,7 +446,7 @@ class QueueZMQ(Queue):
                         req = _out.recv()
                         _out.send_json(_in.recv_json())
             # ------------------------------------------------------------------
-            
+
             addr_in  = str(self._addr)
             addr_out = str(_port_inc(self._addr))
             self._p  = mp.Process(target=_bridge, args=[self._ctx, addr_in, addr_out])
@@ -474,8 +482,8 @@ class QueueZMQ(Queue):
     def put(self, msg):
 
         if not self._role == QUEUE_INPUT:
-            raise RuntimeError("queue %s (%s) can't put()" % (self._name, self._role))
-       
+            raise RuntimeError("queue %s (%s) can't put()" % (self._qname, self._role))
+
       # self._log("-> %s" % pprint.pformat(msg))
         self._q.send_json(msg)
 
@@ -485,8 +493,8 @@ class QueueZMQ(Queue):
     def get(self):
 
         if not self._role == QUEUE_OUTPUT:
-            raise RuntimeError("queue %s (%s) can't get()" % (self._name, self._role))
-       
+            raise RuntimeError("queue %s (%s) can't get()" % (self._qname, self._role))
+
         self._q.send('request')
 
         msg = self._q.recv_json()
@@ -496,10 +504,10 @@ class QueueZMQ(Queue):
 
     # --------------------------------------------------------------------------
     #
-    def get_nowait(self, timeout=None):
+    def get_nowait(self, timeout=None): # timeout in ms
 
         if not self._role == QUEUE_OUTPUT:
-            raise RuntimeError("queue %s (%s) can't get_nowait()" % (self._name, self._role))
+            raise RuntimeError("queue %s (%s) can't get_nowait()" % (self._qname, self._role))
 
         with self._lock: # need to protect self._requested
 

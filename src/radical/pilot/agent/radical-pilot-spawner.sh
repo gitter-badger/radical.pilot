@@ -50,7 +50,7 @@ fi
 # -- but printf will interprete every single '%' in the string, which we don't
 # want.  We thus escape it to '%%'
 qprintf(){
-  \echo "$*" | sed -e 's/%/%%/g' | \xargs --null \printf 
+  \printf "%b\n" "$*"
 }
 
 # --------------------------------------------------------------------
@@ -282,7 +282,7 @@ create_monitor () {
   # --------------------------------------------------------------------
   # Make sure we don't interpret '%' on printf
   qprintf(){
-    \\echo "\$*" | sed -e 's/%/%%/g' | \\xargs --null \\printf 
+    \\printf "%b\\n" "\$*"
   }
 
   # create the monitor wrapper script once -- this is used by all job startup
