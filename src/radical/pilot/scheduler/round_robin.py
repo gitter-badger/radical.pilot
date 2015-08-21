@@ -41,23 +41,35 @@ class RoundRobinScheduler(Scheduler):
 
     # -------------------------------------------------------------------------
     #
-    def pilot_added (self, pilot) :
+    def add_pilots(self, pilots):
 
-        pid = pilot.uid
+        for pilot in ru.tolist(pilots):
 
-        self.pilots[pid] = dict()
-        self.pilots[pid]['resource'] = pilot.resource
-        self.pilots[pid]['sandbox']  = pilot.sandbox
+            pid = pilot.uid
+
+            self.pilots[pid] = dict()
+            self.pilots[pid]['sandbox']  = pilot.sandbox
+            self.pilots[pid]['resource'] = pilot.resource
+            self.pilots[pid]['instance'] = pilot
 
 
     # -------------------------------------------------------------------------
     #
-    def pilot_removed (self, pid) :
+    def get_pilots(self):
 
-        if  not pid in self.pilots :
-            raise RuntimeError ('cannot remove unknown pilot (%s)' % pid)
+        return [x['instance'] for x in self.pilots.values()]
 
-        del self.pilots[pid]
+
+    # -------------------------------------------------------------------------
+    #
+    def remove_pilots(self, pids):
+
+        for pid in ru.tolist(pids):
+
+            if  not pid in self.pilots :
+                raise RuntimeError ('cannot remove unknown pilot (%s)' % pid)
+
+            del self.pilots[pid]
 
 
     # -------------------------------------------------------------------------
@@ -84,7 +96,7 @@ class RoundRobinScheduler(Scheduler):
             raise RuntimeError ('Unit scheduler cannot operate on empty pilot set')
 
 
-        for unit in units :
+        for unit in ru.tolist(units):
             
             if  self.idx >= len(pilot_ids) : 
                 self.idx = 0

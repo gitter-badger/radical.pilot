@@ -265,56 +265,71 @@ class BackfillingScheduler(Scheduler):
 
     # -------------------------------------------------------------------------
     #
-    def pilot_added (self, pilot) :
+    def add_pilots(self, pilots) :
 
         with self.lock :
 
-            pid = pilot.uid
+            pids = list()
+            for pilot in ru.tolist(pilots):
 
-            # get initial information about the pilot capabilities
-            #
-            # NOTE: this assumes that the pilot manages no units, yet.  This will
-            # generally be true, as the UM will call this methods before it submits
-            # any units.  This will, however, work badly with pilots which are added
-            # to more than one UM.  This though holds true for other parts in this
-            # code as well, thus we silently ignore this issue for now, and accept
-            # this as known limitation....
-            self.runqs [pid] = dict()
-            self.pilots[pid] = dict()
-            self.pilots[pid]['cores']    = pilot.description.cores
-            self.pilots[pid]['caps']     = pilot.description.cores
-            self.pilots[pid]['state']    = pilot.state
-            self.pilots[pid]['resource'] = pilot.resource
-            self.pilots[pid]['sandbox']  = pilot.sandbox
+                pid = pilot.uid
+                pids.append(pid)
 
-            if  OVERSUBSCRIPTION_RATE :
-                self.pilots[pid]['caps'] += int(OVERSUBSCRIPTION_RATE * pilot.description.cores / 100.0)
+                # get initial information about the pilot capabilities
+                #
+                # NOTE: this assumes that the pilot manages no units, yet.  This will
+                # generally be true, as the UM will call this methods before it submits
+                # any units.  This will, however, work badly with pilots which are added
+                # to more than one UM.  This though holds true for other parts in this
+                # code as well, thus we silently ignore this issue for now, and accept
+                # this as known limitation....
+                self.runqs [pid] = dict()
+                self.pilots[pid] = dict()
+                self.pilots[pid]['cores']    = pilot.description.cores
+                self.pilots[pid]['caps']     = pilot.description.cores
+                self.pilots[pid]['state']    = pilot.state
+                self.pilots[pid]['resource'] = pilot.resource
+                self.pilots[pid]['sandbox']  = pilot.sandbox
+                self.pilots[pid]['instance'] = pilot
 
-            # make sure we register callback only once per pmgr
-            pmgr = pilot.pilot_manager
-            if  pmgr not in self.pmgrs :
-                self.pmgrs.append (pmgr)
-                pmgr.register_callback (self._pilot_state_callback)
+                if  OVERSUBSCRIPTION_RATE :
+                    self.pilots[pid]['caps'] += int(OVERSUBSCRIPTION_RATE * pilot.description.cores / 100.0)
+
+                # make sure we register callback only once per pmgr
+                pmgr = pilot.pilot_manager
+                if  pmgr not in self.pmgrs :
+                    self.pmgrs.append (pmgr)
+                    pmgr.register_callback (self._pilot_state_callback)
 
             # if we have any pending units, we better serve them now...
-            self._reschedule (target_pid=pid)
+            self._reschedule (target_pids=pids)
 
 
     # -------------------------------------------------------------------------
     #
-    def pilot_removed (self, pid) :
+    def remove_pilots(self, pids):
 
         with self.lock :
-            if  not pid in self.pilots :
-                raise RuntimeError ('cannot remove unknown pilot (%s)' % pid)
 
-            # NOTE: we don't care if that pilot had any CUs active -- its up to the
-            # UM what happens to those.
+            for pid in ru.tolist(pids):
 
-            del self.pilots[pid]
-            # FIXME: how can I *un*register a pilot callback?
+                if  not pid in self.pilots :
+                    raise RuntimeError ('cannot remove unknown pilot (%s)' % pid)
 
-            # no need to schedule, really
+                # NOTE: we don't care if that pilot had any CUs active -- its up to the
+                # UM what happens to those.
+
+                del self.pilots[pid]
+                # FIXME: how can I *un*register a pilot callback?
+
+                # no need to schedule, really
+
+
+    # -------------------------------------------------------------------------
+    #
+    def get_pilots(self):
+
+        return [x['instance'] for x in self.pilots.values()]
 
 
     # -------------------------------------------------------------------------
@@ -354,7 +369,7 @@ class BackfillingScheduler(Scheduler):
         with self.lock :
 
             # the UM revokes the control over this unit from us...
-            for unit in units :
+            for unit in ru.tolist(units):
 
                 uid = unit.uid
 
@@ -376,7 +391,7 @@ class BackfillingScheduler(Scheduler):
 
     # -------------------------------------------------------------------------
     #
-    def _reschedule (self, target_pid=None, uid=None) :
+    def _reschedule (self, target_pids=None, uids=None) :
 
         with self.lock :
 
@@ -399,9 +414,10 @@ class BackfillingScheduler(Scheduler):
                 logger.warning ("cannot schedule -- no pilots available")
                 return 
 
-            if  target_pid and target_pid not in self.pilots :
-                logger.warning ("cannot schedule -- invalid target pilot %s" % target_pid)
-                raise RuntimeError ("Invalid pilot (%s)" % target_pid)
+            for target_pid in ru.tolist(target_pids):
+                if  target_pid and target_pid not in self.pilots :
+                    logger.warning ("cannot schedule -- invalid target pilot %s" % target_pid)
+                    raise RuntimeError ("Invalid pilot (%s)" % target_pid)
                 
 
             schedule           = dict()
@@ -412,7 +428,7 @@ class BackfillingScheduler(Scheduler):
 
 
             units_to_schedule = list()
-            if  uid :
+            for uid in ru.tolist(uids):
 
                 if  uid not in self.waitq :
                   # self._dump ()
@@ -421,10 +437,10 @@ class BackfillingScheduler(Scheduler):
 
                 units_to_schedule.append (self.waitq[uid])
 
-            else :
-                # just copy the whole waitq
+            # if no uids given, look at the complete waitqueue
+            if not uids:
                 for uid in self.waitq :
-                    units_to_schedule.append (self.waitq[uid])
+                    units_to_schedule.append(self.waitq[uid])
 
 
             for unit in units_to_schedule :

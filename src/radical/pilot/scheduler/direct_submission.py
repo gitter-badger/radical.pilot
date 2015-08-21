@@ -39,23 +39,35 @@ class DirectSubmissionScheduler(Scheduler):
 
     # -------------------------------------------------------------------------
     #
-    def pilot_added (self, pilot) :
+    def add_pilots(self, pilots):
 
-        pid = pilot.uid
+        for pilots in ru.tolist(pilots):
 
-        self.pilots[pid] = dict()
-        self.pilots[pid]['resource'] = pilot.resource
-        self.pilots[pid]['sandbox']  = pilot.sandbox
+            pid = pilot.uid
+
+            self.pilots[pid] = dict()
+            self.pilots[pid]['sandbox']  = pilot.sandbox
+            self.pilots[pid]['resource'] = pilot.resource
+            self.pilots[pid]['instance'] = pilot
 
 
     # -------------------------------------------------------------------------
     #
-    def pilot_removed (self, pid) :
+    def remove_pilots(self, pids):
 
-        if  not pid in self.pilots :
-            raise RuntimeError ('cannot remove unknown pilot (%s)' % pid)
+        for pid in ru.tolist(pids):
 
-        del self.pilots[pid]
+            if not pid in self.pilots :
+                raise RuntimeError ('cannot remove unknown pilot (%s)' % pid)
+
+            del self.pilots[pid]
+
+
+    # -------------------------------------------------------------------------
+    #
+    def get_pilots(self):
+
+        return [x['instance'] for x in self.pilots.values()]
 
 
     # -------------------------------------------------------------------------
@@ -74,9 +86,12 @@ class DirectSubmissionScheduler(Scheduler):
         schedule['units']  = dict()
         schedule['pilots'] = self.pilots
 
-        for unit in units:
+        for unit in ru.tolist(units):
 
             schedule['units'][unit] = pilot_ids[0]
 
         return schedule
+
+
+# -----------------------------------------------------------------------------
 

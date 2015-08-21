@@ -157,6 +157,79 @@ class Component(mp.Process):
 
     # --------------------------------------------------------------------------
     #
+    @staticmethod
+    def start_bridges(bridges, logger=None):
+        """
+        Helper method to start a given set of bridges
+        """
+
+        if logger:
+            log = logger
+        else:
+            log = ru.get_logger('radical.pilot')
+
+        log.debug('start_bridges')
+
+        ret = list()
+        for b in bridges:
+
+            log.info('create bridge %s', b)
+            if b.endswith('queue'):
+                ret.append(rpu.Queue.create(rpu.QUEUE_ZMQ, b, rpu.QUEUE_BRIDGE))
+            elif b.endswith('pubsub'):
+                ret.append(rpu.Pubsub.create(rpu.PUBSUB_ZMQ, b, rpu.PUBSUB_BRIDGE))
+            else:
+                raise ValueError('unknown bridge type for %s' % b)
+
+        log.debug('start_bridges done')
+
+        return ret
+
+
+    # --------------------------------------------------------------------------
+    #
+    @staticmethod
+    def start_components(components, typemap, cfg, logger=None):
+        """
+        This method expects a 'components' dict of the form:
+          {
+            'component_name' : <number>
+          }
+        where <number> specifies how many instances are to be created for each
+        type.  The 'typemap' is also expected to be a dict which maps the
+        component names from the 'components' dict to class types -- as an
+        example:
+          {
+            'agent_update_worker : AgentUpdateWorker
+          }
+        Components will be passed the 'cfg', but a deepcopy of that config is
+        created first, and a 'number' key is set to the index of the component
+        instance, so that the components can be uniquely identified.
+        """
+
+        if logger: log = logger
+        else     : log = ru.get_logger('radical.pilot')
+
+        log.debug("start_components")
+
+        ret = list()
+        for cname, cnum in components.iteritems():
+            for i in range(cnum):
+                # each component gets its own copy of the config
+                log.info('create component %s (%s)', cname, cnum)
+                ccfg = copy.deepcopy(cfg)
+                ccfg['number'] = i
+                comp = typemap[cname].create(ccfg)
+                comp.start()
+                ret.append(comp)
+
+        log.debug("start_components done")
+
+        return ret
+
+
+    # --------------------------------------------------------------------------
+    #
     def initialize(self):
         """
         This method MUST be overloaded by the components.  It is called *once*

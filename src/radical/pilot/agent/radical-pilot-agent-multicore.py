@@ -4990,7 +4990,6 @@ class AgentWorker(rpu.Worker):
         self._sub_agents = list()
         self._bridges    = list()
         self._components = list()
-        self._workers    = list()
 
         # configure the agent logger
         self._log.setLevel(self._cfg['debug'])
@@ -5038,7 +5037,7 @@ class AgentWorker(rpu.Worker):
 
     # --------------------------------------------------------------------------
     #
-    def start_sub_agents(self):
+    def start_sub_agents(self, sub_agents):
         """
         For the list of sub_agents, get a launch command and launch that
         agent instance on the respective node.  We pass it to the seconds
@@ -5056,7 +5055,8 @@ class AgentWorker(rpu.Worker):
             cfg    = self._cfg,
             logger = self._log)
 
-        for sa in self._sub_cfg.get('sub_agents', []):
+        ret = list()
+        for sa in sub_agents:
             target = self._cfg['agent_layout'][sa]['target']
             node   = self._cfg['lrms_info']['agent_nodes'].get(target)
 
@@ -5091,96 +5091,12 @@ class AgentWorker(rpu.Worker):
             sa_out = open("%s.out" % sa, "w")
             sa_err = open("%s.err" % sa, "w")
             sa_proc = subprocess.Popen(cmd, shell=True, stdout=sa_out, stderr=sa_err)
-            self._sub_agents.append([sa, sa_proc, sa_out, sa_err])
+            ret.append([sa, sa_proc, sa_out, sa_err])
             self._prof.prof("created", msg=sa)
 
         self._log.debug('start_sub_agents done')
+        return ret
 
-    # --------------------------------------------------------------------------
-    #
-    def start_bridges(self):
-        """
-        For all bridges defined on this agent instance, create that bridge.
-        Keep a handle around for shutting them down later.
-        """
-
-        self._log.debug('start_bridges')
-
-        # ----------------------------------------------------------------------
-        # shortcut for bridge creation
-        bridge_type = {rp.AGENT_STAGING_INPUT_QUEUE  : 'queue',
-                       rp.AGENT_SCHEDULING_QUEUE     : 'queue',
-                       rp.AGENT_EXECUTING_QUEUE      : 'queue',
-                       rp.AGENT_STAGING_OUTPUT_QUEUE : 'queue',
-                       rp.AGENT_UNSCHEDULE_PUBSUB    : 'pubsub',
-                       rp.AGENT_RESCHEDULE_PUBSUB    : 'pubsub',
-                       rp.AGENT_COMMAND_PUBSUB       : 'pubsub',
-                       rp.AGENT_STATE_PUBSUB         : 'pubsub'}
-
-        def _create_bridge(name):
-            self._log.info('create bridge %s', name)
-            if bridge_type[name] == 'queue':
-                return rpu.Queue.create(rpu.QUEUE_ZMQ, name, rpu.QUEUE_BRIDGE)
-            elif bridge_type[name] == 'pubsub':
-                return rpu.Pubsub.create(rpu.PUBSUB_ZMQ, name, rpu.PUBSUB_BRIDGE)
-            else:
-                raise ValueError('unknown bridge type for %s' % name)
-        # ----------------------------------------------------------------------
-
-        # create all bridges we need.  Use the default addresses,
-        # ie. they will bind to all local interfacces on ports 10.000++.
-        for b in self._sub_cfg.get('bridges', []):
-            self._log.debug("start bridge %s" % b)
-            self._bridges.append(_create_bridge(b))
-
-        self._log.debug('start_bridges done')
-
-
-    # --------------------------------------------------------------------------
-    #
-    def start_components(self):
-        """
-        For all componants defined on this agent instance, create the required
-        number of those.  Keep a handle around for shutting them down later.
-        """
-
-        self._log.debug("start_components")
-
-        # We use a static map from component names to class types for now --
-        # a factory might be more appropriate (FIXME)
-        cmap = {
-            "agent_staging_input_component"  : AgentStagingInputComponent,
-            "agent_scheduling_component"     : AgentSchedulingComponent,
-            "agent_executing_component"      : AgentExecutingComponent,
-            "agent_staging_output_component" : AgentStagingOutputComponent
-            }
-        for cname, cnum in self._sub_cfg.get('components',{}).iteritems():
-            for i in range(cnum):
-                # each component gets its own copy of the config
-                self._log.info('create component %s (%s)', cname, cnum)
-                ccfg = copy.deepcopy(self._cfg)
-                ccfg['number'] = i
-                comp = cmap[cname].create(ccfg)
-                comp.start()
-                self._components.append(comp)
-
-        # we also create *one* instance of every 'worker' type -- which are the
-        # heartbeat and update worker.  To ensure this, we only create workers
-        # in agent.0.  
-        # FIXME: make this configurable, both number and placement
-        if self.agent_name == 'agent.0':
-            wmap = {
-                rp.AGENT_UPDATE_WORKER    : AgentUpdateWorker,
-                rp.AGENT_HEARTBEAT_WORKER : AgentHeartbeatWorker
-                }
-            for wname in wmap:
-                self._log.info('create worker %s', wname)
-                wcfg   = copy.deepcopy(self._cfg)
-                worker = wmap[wname].create(wcfg)
-                worker.start()
-                self._workers.append(worker)
-
-        self._log.debug("start_components done")
 
     # --------------------------------------------------------------------------
     #
@@ -5216,9 +5132,27 @@ class AgentWorker(rpu.Worker):
             raise RuntimeError("no agent layout section for %s" % self.agent_name)
 
         try:
-            self.start_bridges()
-            self.start_components()
-            self.start_sub_agents()
+            bridges    = self._sub_cfg.get('bridges',    [])
+            components = self._sub_cfg.get('components', [])
+            sub_agents = self._sub_cfg.get('sub_agents', [])
+
+            # agent.0 also starts one worker instance for each worker type
+            components[rp.AGENT_UPDATE_WORKER]    = 1
+            components[rp.AGENT_HEARTBEAT_WORKER] = 1
+
+            # we also need a map from component names to class types
+            typemap = {
+                rp.AGENT_STAGING_INPUT_COMPONENT   : AgentStagingInputComponent,
+                rp.AGENT_SCHEDULING_COMPONENT      : AgentSchedulingComponent,
+                rp.AGENT_EXECUTING_COMPONENT       : AgentExecutingComponent,
+                rp.AGENT_STAGING_OUTPUT_COMPONENT  : AgentStagingOutputComponent,
+                rp.AGENT_UPDATE_WORKER             : AgentUpdateWorker,
+                rp.AGENT_HEARTBEAT_WORKER          : AgentHeartbeatWorker
+                }
+
+            self._bridges    = rpu.Component.start_bridges   (bridges   )
+            self._components = rpu.Component.start_components(components)
+            self._sub_agents = self.start_sub_agents(sub_agents)
 
             # FIXME: make sure all communication channels are in place.  This could
             # be replaced with a proper barrier, but not sure if that is worth it...
@@ -5230,9 +5164,6 @@ class AgentWorker(rpu.Worker):
             raise
 
         self._prof.prof('Agent setup done', logger=self._log.debug)
-
-        # FIXME: signal the other agents, and shot down all components and
-        #        bridges.
 
 
     # --------------------------------------------------------------------------
@@ -5256,10 +5187,6 @@ class AgentWorker(rpu.Worker):
             self._log.info("closing component %s", c._name)
             c.close()
       
-        for w in self._workers:
-            self._log.info("closing worker %s", w._name)
-            w.close()
-
         for b in self._bridges:
             self._log.info("closing bridge %s", b._name)
             b.close()

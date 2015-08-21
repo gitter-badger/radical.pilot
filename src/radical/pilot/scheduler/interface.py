@@ -28,24 +28,31 @@ class Scheduler(object):
 
     # -------------------------------------------------------------------------
     # 
-    def pilot_added (self, pilot) :
-        """Inform the scheduler about a new pilot"""
+    def add_pilots(self, pilots):
+        """Inform the scheduler about new pilots"""
 
-        logger.warn ("scheduler %s does not implement 'pilot_added()'" % self.name)
+        logger.warn ("scheduler %s does not implement 'add_pilots()'" % self.name)
 
     # -------------------------------------------------------------------------
     # 
-    def pilot_removed (self, pilot) :
-        """Inform the scheduler about a pilot removal"""
+    def remove_pilots (self, pids):
+        """Inform the scheduler about pilot removal"""
 
-        logger.warn ("scheduler %s does not implement 'pilot_removed()'" % self.name)
+        logger.warn ("scheduler %s does not implement 'remove_pilots()'" % self.name)
+
+    # -------------------------------------------------------------------------
+    # 
+    def get_pilots(self):
+        """get a list of pilot instances as used by the scheduler"""
+
+        logger.warn ("scheduler %s does not implement 'get_pilots()'" % self.name)
 
     # -------------------------------------------------------------------------
     # 
     def schedule (self, units) :
         """Schedules one or more ComputeUnits"""
 
-        raise RuntimeError ("scheduler %s does not implement 'pilot_removed()'" % self.name)
+        raise RuntimeError ("scheduler %s does not implement 'schedule()'" % self.name)
 
     # -------------------------------------------------------------------------
     # 
@@ -60,4 +67,6 @@ class Scheduler(object):
     def name(self):
         """The name of the scheduler"""
         return self.__class__.__name__
+
+# -----------------------------------------------------------------------------
 

@@ -26,9 +26,11 @@ from .compute_unit import ComputeUnit
 from .controller   import UnitManagerController
 from .scheduler    import get_scheduler, SCHED_DEFAULT
 
+# TODO: wait queue is on the scheduler
+
 # -----------------------------------------------------------------------------
 #
-class UnitManager(object):
+class UnitManager(rpu.Component):
     """A UnitManager manages :class:`radical.pilot.ComputeUnit` instances which
     represent the **executable** workload in RADICAL-Pilot. A UnitManager connects
     the ComputeUnits with one or more :class:`Pilot` instances (which represent
@@ -71,8 +73,7 @@ class UnitManager(object):
 
     # -------------------------------------------------------------------------
     #
-    def __init__(self, session, scheduler=None, input_transfer_workers=2,
-                 output_transfer_workers=2):
+    def __init__(self, session, scheduler=None):
         """Creates a new UnitManager and attaches it to the session.
 
         **Args:**
@@ -91,114 +92,112 @@ class UnitManager(object):
                   used to tune RADICAL-Pilot's file transfer performance. 
                   However, you should only change the default values if you 
                   know what you are doing.
-
-        **Raises:**
-            * :class:`radical.pilot.PilotException`
         """
-        self._session = session
-        self._worker  = None 
-        self._pilots  = list()
-        self._rec_id  = 0
+        self._session    = session
+        self._components = None 
+        self._bridges    = None 
+        self._pilots     = dict()
+        self._units      = dict()
+        self._batch_id   = 0
 
-        self._uid = ru.generate_id ('umgr') 
+        self._uid = ru.generate_id('umgr')
+        self._log = ru.get_logger(self.uid, "%s.%s.log" % (session.uid, self._uid))
 
-        if not scheduler:
-            scheduler = SCHED_DEFAULT
+        try:
+            
+            cfg = read_json("%s/configs/umgr_%s.json" % ( \
+                    os.path.dirname(__file_),
+                    os.envrion.get('RADICAL_PILOT_UMGR_CONFIG', 'default')))
 
-        # keep track of some changing metrics
-        self.wait_queue_size = 0
+            if scheduler:
+                # overwrite the scheduler from the config file
+                cfg['scheduler'] = scheduler
 
-        self._worker = UnitManagerController(
-            umgr_uid=self._uid, 
-            scheduler=scheduler,
-            input_transfer_workers=input_transfer_workers,
-            output_transfer_workers=output_transfer_workers, 
-            session=self._session)
-        self._worker.start()
+            bridges    = cfg.get('bridges',    [])
+            components = cfg.get('components', [])
 
-        self._scheduler = get_scheduler(name=scheduler, 
-                                        manager=self, 
-                                        session=self._session)
+            # agent.0 also starts one worker instance for each worker type
+            components[rp.UMGR_UPDATE_WORKER]    = 1
+            components[rp.UMGR_HEARTBEAT_WORKER] = 1
 
-        # Each unit manager has a worker thread associated with it.
-        # The task of the worker thread is to check and update the state
-        # of units, fire callbacks and so on.
-        self._session._unit_manager_objects[self.uid] = self
+            # we also need a map from component names to class types
+            typemap = {
+                rp.UMGR_STAGING_INPUT_COMPONENT   : UMGRStagingInputComponent,
+                rp.UMGR_SCHEDULING_COMPONENT      : UMGRSchedulingComponent,
+                rp.UMGR_STAGING_OUTPUT_COMPONENT  : UMGRStagingOutputComponent,
+                rp.UMGR_UPDATE_WORKER             : UMGRUpdateWorker,
+                rp.UMGR_HEARTBEAT_WORKER          : UMGRHeartbeatWorker
+                }
 
-        self._valid = True
+            self._bridges    = rpu.Component.start_bridges   (bridges)
+            self._components = rpu.Component.start_components(components, typemap)
+
+            # FIXME: make sure all communication channels are in place.  This could
+            # be replaced with a proper barrier, but not sure if that is worth it...
+            time.sleep (1)
+
+            # the command pubsub is used to communicate with the scheduler, and
+            # to shut down components, but also to cancel units.  The queue is
+            # used to forward submitted units to the scheduler
+            self.declare_publisher('command', rp.UMGR_COMMAND_PUBSUB)
+            self.declare_output(rp.UMGR_SCHEDULING_PENDING, rp.UMGR_SCHEDULING_QUEUE)
+
+            self._valid = True
+
+        except Exception as e:
+            self._log.exception("Agent setup error: %s" % e)
+            raise
+
+        self._prof.prof('Agent setup done', logger=self._log.debug)
 
 
-    #--------------------------------------------------------------------------
+    # --------------------------------------------------------------------------
     #
     def close(self):
-        """Shuts down the UnitManager and its background workers in a 
-        coordinated fashion.
         """
-        if not self._valid:
-            raise RuntimeError("instance is already closed")
+        Shuts down the UnitManager and its components.
+        """
 
-        if self._worker:
-            self._worker.stop()
+        for c in self._components:
+            self._log.info("closing component %s", c._name)
+            c.close()
+      
+        for b in self._bridges:
+            self._log.info("closing bridge %s", b._name)
+            b.close()
 
         logger.info("Closed UnitManager %s." % str(self._uid))
 
         self._valid = False
 
 
-    # -------------------------------------------------------------------------
-    #
-    def as_dict(self):
-        """Returns a Python dictionary representation of the UnitManager
-        object.
-        """
-        obj_dict = {
-            'uid':               self.uid,
-            'scheduler':         self.scheduler,
-            'scheduler_details': self.scheduler_details
-        }
-        return obj_dict
-
-    # -------------------------------------------------------------------------
-    #
-    def __str__(self):
-        """Returns a string representation of the UnitManager object.
-        """
-        return str(self.as_dict())
-
     #--------------------------------------------------------------------------
     #
     @property
     def uid(self):
-        """Returns the unique id.
+        """
+        Returns the unique id.
         """
         return self._uid
+
 
     #--------------------------------------------------------------------------
     #
     @property
     def scheduler(self):
-        """Returns the scheduler name.
         """
-        if not self._valid:
-            raise RuntimeError("instance is already closed")
-
-        return self._scheduler.name
-
-    #--------------------------------------------------------------------------
-    #
-    @property
-    def scheduler_details(self):
-        """Returns the scheduler logs.
+        Returns the scheduler name.
         """
-        if not self._valid:
-            raise RuntimeError("instance is already closed")
 
-        return "NO SCHEDULER DETAILS (Not Implemented)"
+        return self._cfg['scheduler']
+
 
     # -------------------------------------------------------------------------
     #
     def add_pilots(self, pilots):
-        """Associates one or more pilots with the unit manager.
+        """
+        Associates one or more pilots with the unit manager.  Those pilots are
+        then available for the scheduler to place units onto them.
 
         **Arguments:**
 
@@ -206,31 +205,17 @@ class UnitManager(object):
               :class:`radical.pilot.ComputePilot`]: The pilot objects that will be
               added to the unit manager.
 
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        if not isinstance(pilots, list):
-            pilots = [pilots]
+        # FIXME: this needs to be picked up the scheduler
+        self.publish('command', {'cmd' : 'add_pilots', 
+                                 'arg' : [x.as_dict for x in ru.tolist(pilots)]})
 
-        pilot_ids = self.list_pilots()
-
-        for pilot in pilots :
-            if  pilot.uid in pilot_ids :
-                logger.warning ('adding the same pilot twice (%s)' % pilot.uid)
-
-        self._worker.add_pilots(pilots)
-
-        # let the scheduler know...
-        for pilot in pilots :
-            self._scheduler.pilot_added (pilot)
-
-        # also keep the instances around
-        for pilot in pilots :
-            self._pilots.append (pilot)
+        for pilot in ru.tolist(pilots):
+            self._pilots[pilot.uid] = pilot
 
 
     # -------------------------------------------------------------------------
@@ -242,15 +227,11 @@ class UnitManager(object):
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputePilot` UIDs [`string`].
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        return self._worker.get_pilot_uids()
+        return self._pilots.keys()
 
 
     # -------------------------------------------------------------------------
@@ -262,19 +243,16 @@ class UnitManager(object):
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputePilot` instances.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        return self._pilots
+        return self._pilots.values()
+
 
     # -------------------------------------------------------------------------
     #
-    def remove_pilots(self, pilot_ids, drain=True):
+    def remove_pilots(self, pids, drain=True):
         """Disassociates one or more pilots from the unit manager.
 
         TODO: Implement 'drain'.
@@ -289,38 +267,19 @@ class UnitManager(object):
               which are managed by the removed pilot(s). If `True`, all units
               currently assigned to the pilot are allowed to finish execution.
               If `False` (the default), then `ACTIVE` units will be canceled.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        if not isinstance(pilot_ids, list):
-            pilot_ids = [pilot_ids]
+        # FIXME: this needs to be picked up the scheduler
+        self.publish('command', {'cmd' : 'remove_pilots', 
+                                 'arg' : {'pids'  : [ru.tolist(pids)],
+                                          'drain' : drain}})
 
-        self._worker.remove_pilots(pilot_ids)
+        for pid in ru.tolist(pids):
+            del(self._pilots[pid])
 
-
-        # FIXME:
-        # if a pilot gets removed, we need to re-assign all its units to other
-        # pilots.   We thus move them all into the wait queue, and call the
-        # global rescheduler.  Some of the CUs might already be in final state
-        # -- those are ignored (they'll be in the done_queue anyways).  We leave
-        # it to the scheduling policy what happens to non-NEW CUs in the
-        # wait_queue, i.e. if they get rescheduled, or if they'll raise an
-        # error.
-
-        # let the scheduler know...
-        for pilot_id in pilot_ids :
-            self._scheduler.pilot_removed (pilot_id)
-
-        # update instance list
-        for pilot_id in pilot_ids :
-            for pilot in self._pilots[:] :
-                if  pilot_id == pilot.uid :
-                    self._pilots.remove (pilot)
 
     # -------------------------------------------------------------------------
     #
@@ -331,231 +290,89 @@ class UnitManager(object):
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputeUnit` UIDs [`string`].
-
         """
+
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        return self._worker.get_compute_unit_uids()
+        return self._units.keys()
 
 
     # -------------------------------------------------------------------------
     #
-    def submit_units(self, unit_descriptions):
+    def submit_units(self, uds):
         """Submits on or more :class:`radical.pilot.ComputeUnit` instances to the
         unit manager.
 
         **Arguments:**
 
-            * **unit_descriptions** [:class:`radical.pilot.ComputeUnitDescription`
+            * **uds** [:class:`radical.pilot.ComputeUnitDescription`
               or list of :class:`radical.pilot.ComputeUnitDescription`]: The
               description of the compute unit instance(s) to create.
 
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputeUnit` objects.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
 
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        return_list_type = True
-        if not isinstance(unit_descriptions, list):
-            return_list_type  = False
-            unit_descriptions = [unit_descriptions]
-
-        # we return a list of compute units
-        ret = list()
-
-        # the scheduler will return a dictionary of the form:
-        #   {
-        #     ud_1 : pilot_id_a,
-        #     ud_2 : pilot_id_b
-        #     ...
-        #   }
-        #
-        # The scheduler may not be able to schedule some units - those will
-        # have 'None' as pilot ID.
-
+        # create the units as requested
         units = list()
-        for ud in unit_descriptions :
+        for ud in ru.tolist(uds):
 
             u = ComputeUnit.create (unit_description=ud,
-                                    unit_manager_obj=self, 
-                                    local_state=SCHEDULING)
+                                    unit_manager_obj=self.uid)
             units.append(u)
 
             if self._session._rec:
                 import radical.utils as ru
                 ru.write_json(ud.as_dict(), "%s/%s.batch.%03d.json" \
-                        % (self._session._rec, u.uid, self._rec_id))
+                        % (self._session._rec, u.uid, self._batch_id))
 
         if self._session._rec:
-            self._rec_id += 1
+            self._batch_id += 1
 
-        self._worker.publish_compute_units (units=units)
+        # keep a handle on the units
+        for unit in units:
+            self._units[unit.uid] = unit
 
-        schedule = None
-        try:
-            schedule = self._scheduler.schedule (units=units)
        
-        except Exception as e:
-            logger.exception ("Internal error - unit scheduler failed")
-            raise 
-
-        self.handle_schedule (schedule)
-
-        if  return_list_type :
-            return units
-        else :
-            return units[0]
+        if ru.islist(uds): return units
+        else             : return units[0]
 
 
     # -------------------------------------------------------------------------
     #
-    def handle_schedule (self, schedule) :
-
-        # we want to use bulk submission to the pilots, so we collect all units
-        # assigned to the same set of pilots.  At the same time, we select
-        # unscheduled units for later insertion into the wait queue.
-        
-        if  not schedule :
-            logger.debug ('skipping empty unit schedule')
-            return
-
-      # print 'handle schedule:'
-      # import pprint
-      # pprint.pprint (schedule)
-      #
-        pilot_cu_map = dict()
-        unscheduled  = list()
-
-        pilot_ids = self.list_pilots ()
-
-        for unit in schedule['units'].keys() :
-
-            pid = schedule['units'][unit]
-
-            if  None == pid :
-                unscheduled.append (unit)
-                continue
-
-            else :
-
-                if  pid not in pilot_ids :
-                    raise RuntimeError ("schedule points to unknown pilot %s" % pid)
-
-                if  pid not in pilot_cu_map :
-                    pilot_cu_map[pid] = list()
-
-                pilot_cu_map[pid].append (unit)
-
-
-        # submit to all pilots which got something submitted to
-        for pid in pilot_cu_map.keys():
-
-            units_to_schedule = list()
-
-            # if a kernel name is in the cu descriptions set, do kernel expansion
-            for unit in pilot_cu_map[pid] :
-
-                if  not pid in schedule['pilots'] :
-                    # lost pilot, do not schedule unit
-                    logger.warn ("unschedule unit %s, lost pilot %s" % (unit.uid, pid))
-                    continue
-
-                unit.sandbox = schedule['pilots'][pid]['sandbox'] + "/" + str(unit.uid)
-
-                ud = unit.description
-
-                if  'kernel' in ud and ud['kernel'] :
-
-                    try :
-                        from radical.ensemblemd.mdkernels import MDTaskDescription
-                    except Exception as ex :
-                        logger.error ("Kernels are not supported in" \
-                              "compute unit descriptions -- install " \
-                              "radical.ensemblemd.mdkernels!")
-                        # FIXME: unit needs a '_set_state() method or something!
-                        self._session._dbs.set_compute_unit_state (unit._uid, FAILED, 
-                                ["kernel expansion failed"])
-                        continue
-
-                    pilot_resource = schedule['pilots'][pid]['resource']
-
-                    mdtd           = MDTaskDescription ()
-                    mdtd.kernel    = ud.kernel
-                    mdtd_bound     = mdtd.bind (resource=pilot_resource)
-                    ud.environment = mdtd_bound.environment
-                    ud.pre_exec    = mdtd_bound.pre_exec
-                    ud.executable  = mdtd_bound.executable
-                    ud.mpi         = mdtd_bound.mpi
-
-
-                units_to_schedule.append (unit)
-
-            if  len(units_to_schedule) :
-                self._worker.schedule_compute_units (pilot_uid=pid,
-                                                     units=units_to_schedule)
-
-
-        # report any change in wait_queue_size
-        old_wait_queue_size = self.wait_queue_size
-
-        self.wait_queue_size = len(unscheduled)
-        if  old_wait_queue_size != self.wait_queue_size :
-            self._worker.fire_manager_callback (WAIT_QUEUE_SIZE, self,
-                                                self.wait_queue_size)
-
-        if  len(unscheduled) :
-            self._worker.unschedule_compute_units (units=unscheduled)
-
-        logger.info ('%s units remain unscheduled' % len(unscheduled))
-
-
-    # -------------------------------------------------------------------------
-    #
-    def get_units(self, unit_ids=None):
+    def get_units(self, uids=None):
         """Returns one or more compute units identified by their IDs.
 
         **Arguments:**
 
-            * **unit_ids** [`string` or `list of strings`]: The IDs of the
+            * **uids** [`string` or `list of strings`]: The IDs of the
               compute unit objects to return.
 
         **Returns:**
 
               * A list of :class:`radical.pilot.ComputeUnit` objects.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        return_list_type = True
-        if (not isinstance(unit_ids, list)) and (unit_ids is not None):
-            return_list_type = False
-            unit_ids = [unit_ids]
-
-        units = ComputeUnit._get(unit_ids=unit_ids, unit_manager_obj=self)
-
-        if  return_list_type :
-            return units
-        else :
-            return units[0]
+        if uids:
+            if ru.islist(uids):
+                return [self._units[x] for x in uids]
+            else:
+                return self._units[uids]
+        else:
+            return self._units.values()
 
     # -------------------------------------------------------------------------
     #
-    def wait_units(self, unit_ids=None,
-                   state=[DONE, FAILED, CANCELED],
-                   timeout=None):
-        """Returns when one or more :class:`radical.pilot.ComputeUnits` reach a
+    def wait_units(self, uids=None, stats=[DONE, FAILED, CANCELED], timeout=None):
+        """
+        Returns when one or more :class:`radical.pilot.ComputeUnits` reach a
         specific state.
 
         If `unit_uids` is `None`, `wait_units` returns when **all**
@@ -587,80 +404,65 @@ class UnitManager(object):
               Timeout in seconds before the call returns regardless of Pilot
               state changes. The default value **None** waits forever.
 
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
+        **Returns:**
+            * a list of states for the units waited upon.
         """
+
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        if not isinstance(state, list):
-            state = [state]
-
-        return_list_type = True
-        if (not isinstance(unit_ids, list)) and (unit_ids is not None):
-            return_list_type = False
-            unit_ids = [unit_ids]
-
-        units  = self.get_units (unit_ids)
+        units  = ru.tolist(self.get_units(uids))
         start  = time.time()
         all_ok = False
         states = list()
 
-        while not all_ok :
+        while not all_ok:
 
             all_ok = True
             states = list()
 
-            for unit in units :
-                if  unit.state not in state :
+            for unit in units:
+                if  unit.state not in ru.tolist(states):
                     all_ok = False
-
                 states.append (unit.state)
 
             # check timeout
             if  (None != timeout) and (timeout <= (time.time() - start)):
-                if  not all_ok :
-                    logger.debug ("wait timed out: %s" % states)
                 break
 
             # sleep a little if this cycle was idle
-            if  not all_ok :
-                time.sleep (0.1)
+            if not all_ok:
+                time.sleep (0.1) # FIXME: configure
 
         # done waiting
-        if  return_list_type :
-            return states
-        else :
-            return states[0]
+        if ru.islist(uids): return states
+        else              : return states[0]
 
 
     # -------------------------------------------------------------------------
     #
-    def cancel_units(self, unit_ids=None):
+    def cancel_units(self, uids=None):
         """Cancel one or more :class:`radical.pilot.ComputeUnits`.
 
         **Arguments:**
 
-            * **unit_ids** [`string` or `list of strings`]: The IDs of the
+            * **uids** [`string` or `list of strings`]: The IDs of the
               compute unit objects to cancel.
-
-        **Raises:**
-
-            * :class:`radical.pilot.PilotException`
         """
+
         if not self._valid:
             raise RuntimeError("instance is already closed")
 
-        if (not isinstance(unit_ids, list)) and (unit_ids is not None):
-            unit_ids = [unit_ids]
-
-        cus = self.get_units(unit_ids)
+        # let everybody know...
+        cus = ru.tolist(self.get_units(uids))
         for cu in cus:
-            cu.cancel()
+            self.publish('command', {'cmd' : 'cancel_unit', 
+                                     'arg' : cu.uids})
 
 
     # -------------------------------------------------------------------------
+    #
+    # FIXME
     #
     def register_callback(self, callback_function, metric=UNIT_STATE, callback_data=None):
 
