@@ -82,20 +82,20 @@ class UnitManager(rpu.Component):
 
             * scheduler (`string`): The name of the scheduler plug-in to use.
 
-            * input_transfer_workers (`int`): The number of input file transfer 
-              worker processes to launch in the background. 
+            * input_transfer_workers (`int`): The number of input file transfer
+              worker processes to launch in the background.
 
-            * output_transfer_workers (`int`): The number of output file transfer 
-              worker processes to launch in the background. 
+            * output_transfer_workers (`int`): The number of output file transfer
+              worker processes to launch in the background.
 
         .. note:: `input_transfer_workers` and `output_transfer_workers` can be
-                  used to tune RADICAL-Pilot's file transfer performance. 
-                  However, you should only change the default values if you 
+                  used to tune RADICAL-Pilot's file transfer performance.
+                  However, you should only change the default values if you
                   know what you are doing.
         """
         self._session    = session
-        self._components = None 
-        self._bridges    = None 
+        self._components = None
+        self._bridges    = None
         self._pilots     = dict()
         self._units      = dict()
         self._batch_id   = 0
@@ -103,11 +103,18 @@ class UnitManager(rpu.Component):
         self._uid = ru.generate_id('umgr')
         self._log = ru.get_logger(self.uid, "%s.%s.log" % (session.uid, self._uid))
 
+        # FIXME: we want to have a config with, for example, wait_poll_timeout.
+        #        This config should be defined as config file, not inlined as it
+        #        is right now
+        cfg = {'wait_poll_timeout' : 0.1 }
+
+        rpu.Component.__init__(self, cfg)
+
         try:
-            
-            cfg = read_json("%s/configs/umgr_%s.json" % ( \
-                    os.path.dirname(__file_),
-                    os.envrion.get('RADICAL_PILOT_UMGR_CONFIG', 'default')))
+
+            cfg = read_json("%s/configs/umgr_%s.json" \
+                    % (os.path.dirname(__file_),
+                       os.envrion.get('RADICAL_PILOT_UMGR_CONFIG', 'default')))
 
             if scheduler:
                 # overwrite the scheduler from the config file
@@ -122,11 +129,11 @@ class UnitManager(rpu.Component):
 
             # we also need a map from component names to class types
             typemap = {
-                rp.UMGR_STAGING_INPUT_COMPONENT   : UMGRStagingInputComponent,
-                rp.UMGR_SCHEDULING_COMPONENT      : UMGRSchedulingComponent,
-                rp.UMGR_STAGING_OUTPUT_COMPONENT  : UMGRStagingOutputComponent,
-                rp.UMGR_UPDATE_WORKER             : UMGRUpdateWorker,
-                rp.UMGR_HEARTBEAT_WORKER          : UMGRHeartbeatWorker
+                rp.UMGR_STAGING_INPUT_COMPONENT  : UMGRStagingInputComponent,
+                rp.UMGR_SCHEDULING_COMPONENT     : UMGRSchedulingComponent,
+                rp.UMGR_STAGING_OUTPUT_COMPONENT : UMGRStagingOutputComponent,
+                rp.UMGR_UPDATE_WORKER            : UMGRUpdateWorker,
+                rp.UMGR_HEARTBEAT_WORKER         : UMGRHeartbeatWorker
                 }
 
             self._bridges    = rpu.Component.start_bridges   (bridges)
@@ -134,7 +141,7 @@ class UnitManager(rpu.Component):
 
             # FIXME: make sure all communication channels are in place.  This could
             # be replaced with a proper barrier, but not sure if that is worth it...
-            time.sleep (1)
+            time.sleep(1)
 
             # the command pubsub is used to communicate with the scheduler, and
             # to shut down components, but also to cancel units.  The queue is
@@ -161,7 +168,7 @@ class UnitManager(rpu.Component):
         for c in self._components:
             self._log.info("closing component %s", c._name)
             c.close()
-      
+
         for b in self._bridges:
             self._log.info("closing bridge %s", b._name)
             b.close()
@@ -211,7 +218,7 @@ class UnitManager(rpu.Component):
             raise RuntimeError("instance is already closed")
 
         # FIXME: this needs to be picked up the scheduler
-        self.publish('command', {'cmd' : 'add_pilots', 
+        self.publish('command', {'cmd' : 'add_pilots',
                                  'arg' : [x.as_dict for x in ru.tolist(pilots)]})
 
         for pilot in ru.tolist(pilots):
@@ -273,7 +280,7 @@ class UnitManager(rpu.Component):
             raise RuntimeError("instance is already closed")
 
         # FIXME: this needs to be picked up the scheduler
-        self.publish('command', {'cmd' : 'remove_pilots', 
+        self.publish('command', {'cmd' : 'remove_pilots',
                                  'arg' : {'pids'  : [ru.tolist(pids)],
                                           'drain' : drain}})
 
@@ -322,8 +329,8 @@ class UnitManager(rpu.Component):
         units = list()
         for ud in ru.tolist(uds):
 
-            u = ComputeUnit.create (unit_description=ud,
-                                    unit_manager_obj=self.uid)
+            u = ComputeUnit.create(unit_description=ud,
+                                   unit_manager_obj=self.uid)
             units.append(u)
 
             if self._session._rec:
@@ -338,7 +345,6 @@ class UnitManager(rpu.Component):
         for unit in units:
             self._units[unit.uid] = unit
 
-       
         if ru.islist(uds): return units
         else             : return units[0]
 
@@ -422,17 +428,17 @@ class UnitManager(rpu.Component):
             states = list()
 
             for unit in units:
-                if  unit.state not in ru.tolist(states):
+                if unit.state not in ru.tolist(states):
                     all_ok = False
-                states.append (unit.state)
+                states.append(unit.state)
 
             # check timeout
-            if  (None != timeout) and (timeout <= (time.time() - start)):
+            if (None != timeout) and (timeout <= (time.time() - start)):
                 break
 
             # sleep a little if this cycle was idle
             if not all_ok:
-                time.sleep (0.1) # FIXME: configure
+                time.sleep(self._cfg.get('wait_poll_timeout', 0.1)
 
         # done waiting
         if ru.islist(uids): return states
@@ -456,15 +462,13 @@ class UnitManager(rpu.Component):
         # let everybody know...
         cus = ru.tolist(self.get_units(uids))
         for cu in cus:
-            self.publish('command', {'cmd' : 'cancel_unit', 
+            self.publish('command', {'cmd' : 'cancel_unit',
                                      'arg' : cu.uids})
 
 
     # -------------------------------------------------------------------------
     #
-    # FIXME
-    #
-    def register_callback(self, callback_function, metric=UNIT_STATE, callback_data=None):
+    def register_callback(self, metric=UNIT_STATE, cb, cb_data=None):
 
         """
         Registers a new callback function with the UnitManager.  Manager-level
@@ -491,10 +495,40 @@ class UnitManager(rpu.Component):
           * `WAIT_QUEUE_SIZE`: fires when the number of unscheduled units (i.e.
             of units which have not been assigned to a pilot for execution)
             changes.
+            FIXME: this is not upported, yet, and should become a cb on the
+            umgr_scheduler.
         """
 
-        if  metric not in UNIT_MANAGER_METRICS :
+        if metric not in UNIT_MANAGER_METRICS:
             raise ValueError ("Metric '%s' is not available on the unit manager" % metric)
 
-        self._worker.register_manager_callback(callback_function, metric, callback_data)
+        if metric == UNIT_STATE:
+            # ------------------------------------------------------------------
+            # unit state callbacks are callbacks on the state pubsub.  We have
+            # to do an intermediate step though, to translate callback
+            # signatures.  It is somewhat tricky to handle callback data in the
+            # two-layer-callback proxying -- sorry for that...
+            def state_cb_proxy(topic, msg, state_cb_data):
+                assert('topic' == 'state')
+                uid   = msg.get('_id')
+                unit  = self._units.get(uid)
+
+                if not unit:
+                    self._logger.error("cannot proxy unit state cb for '%s'" % uid)
+                    return
+
+                _cb      = state_cb_data['cb']
+                _cb_data = state_cb_data['cb_data']
+                return _cb(unit, unit['state'], _cb_data)
+            # ------------------------------------------------------------------
+
+            state_cb_data = {'cb'      : cb,
+                             'cb_data' : cb_data}
+            self.declare_subscriber('state', UMGR_STATE_PUBSUB,
+                    state_cb_proxy, state_cb_data)
+
+        if metric == WAIT_QUEUE_SIZE:
+            raise NotImplementedError("Metric '%s' is not yet supported" % metric)
+
+# ------------------------------------------------------------------------------
 

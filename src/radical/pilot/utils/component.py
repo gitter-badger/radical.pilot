@@ -439,7 +439,7 @@ class Component(mp.Process):
 
     # --------------------------------------------------------------------------
     #
-    def declare_subscriber(self, topic, pubsub, cb):
+    def declare_subscriber(self, topic, pubsub, cb, cb_data=None):
         """
         This method is complementary to the declare_publisher() above: it
         declares a subscription to a pubsub channel.  If a notification
@@ -455,11 +455,14 @@ class Component(mp.Process):
         """
 
         # ----------------------------------------------------------------------
-        def _subscriber(q, callback):
+        def _subscriber(p, callback, callback_data):
             while not self._terminate.is_set():
-                topic, msg = q.get_nowait(1000) # timout in ms
+                topic, msg = p.get_nowait(1000) # timout in ms
                 if topic and msg:
-                    callback (topic=topic, msg=msg)
+                    if callback_data:
+                        callback (topic=topic, msg=msg, cb_data=callback_data)
+                    else:
+                        callback (topic=topic, msg=msg)
         # ----------------------------------------------------------------------
 
         # check if a remote address is configured for the queue
@@ -467,15 +470,15 @@ class Component(mp.Process):
         self._log.debug("using addr %s for pubsub %s" % (addr, pubsub))
 
         # create a pubsub subscriber, and subscribe to the given topic
-        q = rpu_Pubsub.create(rpu_PUBSUB_ZMQ, pubsub, rpu_PUBSUB_SUB, addr)
-        q.subscribe(topic)
+        p = rpu_Pubsub.create(rpu_PUBSUB_ZMQ, pubsub, rpu_PUBSUB_SUB, addr)
+        p.subscribe(topic)
 
-        t = mt.Thread (target=_subscriber, args=[q,cb])
+        t = mt.Thread (target=_subscriber, args=[p,cb,cb_data])
         t.start()
         self._threads.append(t)
 
-        self._log.debug('%s declared subscriber: %s : %s : %s : %s' \
-                % (self._cname, topic, pubsub, cb, t.name))
+        self._log.debug('%s declared subscriber: %s : %s : %s(%s) : %s' \
+                % (self._cname, topic, pubsub, cb, str(cb_data), t.name))
 
 
     # --------------------------------------------------------------------------
