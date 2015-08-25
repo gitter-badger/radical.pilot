@@ -12,50 +12,6 @@ import radical.utils as ru
 # "label", "component", "event", "message"
 #
 _prof_fields  = ['time', 'name', 'uid', 'state', 'event', 'msg']
-_prof_entries = [
-    ('a_get_u',         'Agent',           'get', 'MongoDB to Agent (PendingAgentInputStaging)'),
-    ('a_build_u',       'Agent',           'Agent get unit meta', ''),
-    ('a_mkdir_u',       'Agent',           'Agent get unit mkdir', ''),
-    ('a_notify_alloc',  'Agent',           'put', 'Agent to update_queue (Allocating)'),
-    ('a_to_s',          'Agent',           'put', 'Agent to schedule_queue (Allocating)'),
-
-    ('siw_get_u',       'StageinWorker',   'get', 'stagein_queue to StageinWorker (AgentStagingInput)'),
-    ('siw_u_done',      'StageinWorker',   'put', 'StageinWorker to schedule_queue (Allocating)'),
-    ('siw_notify_done', 'StageinWorker',   'put', 'StageinWorker to update_queue (Allocating)'),
-
-    ('s_get_alloc',     'CONTINUOUS',      'get', 'schedule_queue to Scheduler (Allocating)'),
-    ('s_alloc_failed',  'CONTINUOUS',      'schedule', 'allocation failed'),
-    ('s_allocated',     'CONTINUOUS',      'schedule', 'allocated'),
-    ('s_to_ewo',        'CONTINUOUS',      'put', 'Scheduler to execution_queue (Allocating)'),
-    ('s_unqueue',       'CONTINUOUS',      'unqueue', 're-allocation done'),
-  
-    ('ewo_get',         'ExecWorker',      'get', 'executing_queue to ExecutionWorker (Executing)'),
-    ('ewo_launch',      'ExecWorker',      'ExecWorker unit launch', ''),
-    ('ewo_spawn',       'ExecWorker',      'ExecWorker spawn', ''),
-    ('ewo_script',      'ExecWorker',      'launch script constructed', ''),
-    ('ewo_pty',         'ExecWorker',      'spawning passed to pty', ''),  
-    ('ewo_notify_exec', 'ExecWorker',      'put', 'ExecWorker to update_queue (Executing)'),
-    ('ewo_to_ewa',      'ExecWorker',      'put', 'ExecWorker to watcher (Executing)'),
-  
-    ('ewa_get',         'ExecWatcher',     'get', 'ExecWatcher picked up unit'),
-    ('ewa_complete',    'ExecWatcher',     'execution complete', ''),
-    ('ewa_notify_so',   'ExecWatcher',     'put', 'ExecWatcher to update_queue (StagingOutput)'),
-    ('ewa_to_sow',      'ExecWatcher',     'put', 'ExecWatcher to stageout_queue (PendingAgentOutputStaging)'),
-
-    ('sow_get_u',       'StageoutWorker',  'get', 'stageout_queue to StageoutWorker (AgentOutputStaging)'),
-    ('sow_u_done',      'StageoutWorker',  'final', 'stageout done'),
-    ('sow_notify_done', 'StageoutWorker',  'put', 'StageoutWorker to update_queue (PendingOutputStaging)'),
-
-    ('uw_get_alloc',    'UpdateWorker',    'get', 'update_queue to UpdateWorker (Allocating)'),   
-    ('uw_push_alloc',   'UpdateWorker',    'unit update pushed (Allocating)', ''),
-    ('uw_get_exec',     'UpdateWorker',    'get', 'update_queue to UpdateWorker (Executing)'),
-    ('uw_push_exec',    'UpdateWorker',    'unit update pushed (Executing)', ''),
-    ('uw_get_so',       'UpdateWorker',    'get', 'update_queue to UpdateWorker (StagingOutput)'),
-    ('uw_push_so',      'UpdateWorker',    'unit update pushed (StagingOutput)', ''),
-    ('uw_get_done',     'UpdateWorker',    'get', 'update_queue to UpdateWorker (Done)'),
-    ('uw_push_done',    'UpdateWorker',    'unit update pushed (Done)', '')
-]
-
 # ------------------------------------------------------------------------------
 #
 # profile class
@@ -74,6 +30,8 @@ class Profiler (object):
 
         # this init is only called once (globally).  We synchronize clocks and
         # set timestamp_zero
+
+        self._handles = dict()
 
         # we only profile if so instructed
         if 'RADICAL_PILOT_PROFILE' in os.environ:
@@ -136,6 +94,11 @@ class Profiler (object):
 
         tid = threading.current_thread().name
 
+        if not uid  : uid   = ''
+        if not msg  : msg   = ''
+        if not state: state = ''
+
+
         # NOTE: Don't forget to sync any format changes in the bootstrapper
         #       and downstream analysis tools too!
         self._handle.write("%.4f,%s:%s,%s,%s,%s,%s\n" \
@@ -173,30 +136,11 @@ class Profiler (object):
         return float(time.time()) - self._ts_zero
 
 
-
 # --------------------------------------------------------------------------
 #
 def timestamp():
     # human readable absolute UTC timestamp for log entries in database
     return time.time()
-
-# ------------------------------------------------------------------------------
-#
-# Lookup tuples in dataframe based on uid and the tuple from the elements list
-#
-def _tup2ts(df, uid, tup):
-
-    import numpy as np
-    
-    all_for_uid = df[df.uid == uid].fillna('')
-    val = all_for_uid[(all_for_uid.component.str.startswith(tup[1])) &
-                      (all_for_uid.event == tup[2]) &
-                      (all_for_uid.message == tup[3])].time
-    try:
-        return val.iloc[0]
-    except Exception as e:
-        return np.NaN
-
 
 # ------------------------------------------------------------------------------
 #
@@ -215,6 +159,8 @@ def prof2frame(prof):
     # --------------------------------------------------------------------------
     # add a flag to indicate entity type
     def _entity (row):
+        if not row['uid']:
+            return 'session'
         if 'unit' in row['uid']:
             return 'unit'
         if 'pilot' in row['uid']:
@@ -225,24 +171,12 @@ def prof2frame(prof):
     # --------------------------------------------------------------------------
     # add a flag to indicate if a unit / pilot / ... is cloned
     def _cloned (row):
-        return 'clone' in row['uid'].lower()
+        if not row['uid']:
+            return False
+        else:
+            return 'clone' in row['uid'].lower()
     frame['cloned'] = frame.apply(lambda row: _cloned (row), axis=1)
 
-    # --------------------------------------------------------------------------
-    # we also derive some specific info from the event/msg columns, based on
-    # the mapping defined in _prof_entries.  That should make it easier to
-    # analyse the data.
-    def _info (row):
-        for info, name, event, msg in _prof_entries:
-            ret = np.NaN
-            if  name  in row['name']  and \
-                event == row['event'] and \
-                msg   == row['msg']   :
-                ret = info
-                break
-        return ret
-    frame['info'] = frame.apply(lambda row: _info (row), axis=1)
-    
     return frame
 
 
@@ -338,7 +272,7 @@ def combine_profiles(profiles):
     for prof in profiles:
         p     = list()
         tref  = None
-        with open(prof) as csvfile:
+        with open(prof, 'r') as csvfile:
             reader = csv.DictReader(csvfile, fieldnames=_prof_fields)
             empty  = True
             for row in reader:
@@ -452,14 +386,14 @@ def blowup(config, cus, component, logger=None):
         cus = [cus]
 
     # blowup is only enabled on profiling
-    global _p
-    if not _p or not _p.enabled: 
+    if 'RADICAL_PILOT_PROFILE' not in os.environ:
         return
 
     factor = config['blowup_factor'].get (component, 1)
     drop   = config['drop_clones']  .get (component, 1)
 
-    prof ("debug", msg="%s drops with %s" % (component, drop))
+    # FIXME
+  # prof ("debug", msg="%s drops with %s" % (component, drop))
 
     cloned  = list()
     dropped = list()
@@ -471,13 +405,15 @@ def blowup(config, cus, component, logger=None):
         if drop >= 1:
             # drop clones --> drop matching uid's
             if '.clone_' in uid :
-                prof ('drop clone', msg=component, uid=uid)
+                # FIXME
+              # prof ('drop clone', msg=component, uid=uid)
                 dropped.append(cu)
                 continue
 
         if drop >= 2:
             # drop everything, even original units
-            prof ('drop', msg=component, uid=uid)
+            # FIXME
+          # prof ('drop', msg=component, uid=uid)
             dropped.append(cu)
             continue
 
@@ -497,7 +433,8 @@ def blowup(config, cus, component, logger=None):
 
             idx += 1
             cloned.append(cu_clone)
-            prof('add clone', msg=component, uid=clone_id, state=cu['state'])
+            # FIXME
+          # prof('add clone', msg=component, uid=clone_id)
 
         # For any non-zero factor, append the original unit -- factor==0 lets us
         # drop the cu.

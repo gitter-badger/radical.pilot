@@ -37,6 +37,7 @@ DEFAULT_AGENT_SPAWNER = 'POPEN'
 DEFAULT_RP_VERSION    = 'local'
 DEFAULT_VIRTENV       = '%(global_sandbox)s/ve'
 DEFAULT_VIRTENV_MODE  = 'update'
+DEFAULT_AGENT_CONFIG  = 'default'
 
 # ----------------------------------------------------------------------------
 #
@@ -335,43 +336,6 @@ class PilotLauncherWorker(threading.Thread):
                         pilot_sandbox  = compute_pilot['sandbox']
                         global_sandbox = compute_pilot['global_sandbox']
 
-                        # Agent configuration that is not part of the public API.
-                        # The agent config can either be a config dict, or
-                        # a string pointing to a configuration name.  If neither
-                        # is given, check if 'RADICAL_PILOT_AGENT_CONFIG' is
-                        # set.  The last fallback is 'agent_default'
-                        agent_config = compute_pilot['description'].get('_config')
-                        if not agent_config:
-                            agent_config = os.environ.get('RADICAL_PILOT_AGENT_CONFIG')
-                        if not agent_config:
-                            agent_config = 'default'
-
-                        if isinstance(agent_config, dict):
-                            # nothing to do
-                            pass
-
-                        elif isinstance(agent_config, basestring):
-                            try:
-                                if os.path.exists(agent_config):
-                                    # try to open as file name
-                                    logger.info("read config file: %s" % agent_config)
-                                    agent_cfg = ru.read_json(agent_config)
-                                else:
-                                    # otherwise interpret as a config name
-                                    # FIXME: load in session just like resource
-                                    #        configs, including user level overloads 
-                                    module_path = os.path.dirname(os.path.abspath(__file__))
-                                    config_path = "%s/../configs/" % module_path
-                                    agent_cfg_file = "%s/agent_%s.json" % (config_path, agent_config)
-                                    logger.info("read config file: %s" % agent_cfg_file)
-                                    agent_cfg = ru.read_json(agent_cfg_file)
-                            except Exception as e:
-                                logger.exception("error reading config file: %s" % e)
-
-                        else:
-                            # we can't handle this type
-                            raise TypeError('agent config must be string or dict')
-
                         # we expand and exchange keys in the resource config,
                         # depending on the selected schema so better use a deep
                         # copy..
@@ -386,6 +350,7 @@ class PilotLauncherWorker(threading.Thread):
                         agent_dburl             = resource_cfg.get ('agent_mongodb_endpoint', database_url)
                         agent_spawner           = resource_cfg.get ('agent_spawner',       DEFAULT_AGENT_SPAWNER)
                         agent_type              = resource_cfg.get ('agent_type',          DEFAULT_AGENT_TYPE)
+                        rc_agent_config         = resource_cfg.get ('agent_config',        DEFAULT_AGENT_CONFIG)
                         agent_scheduler         = resource_cfg.get ('agent_scheduler')
                         tunnel_bind_device      = resource_cfg.get ('tunnel_bind_device')
                         default_queue           = resource_cfg.get ('default_queue')
@@ -403,11 +368,50 @@ class PilotLauncherWorker(threading.Thread):
                         stage_cacerts           = resource_cfg.get ('stage_cacerts',       'False')
                         cores_per_node          = resource_cfg.get ('cores_per_node')
 
+
+                        # Agent configuration that is not part of the public API.
+                        # The agent config can either be a config dict, or
+                        # a string pointing to a configuration name.  If neither
+                        # is given, check if 'RADICAL_PILOT_AGENT_CONFIG' is
+                        # set.  The last fallback is 'agent_default'
+                        agent_config = compute_pilot['description'].get('_config')
+                        if not agent_config:
+                            agent_config = os.environ.get('RADICAL_PILOT_AGENT_CONFIG')
+                        if not agent_config:
+                            agent_config = rc_agent_config
+
+                        if isinstance(agent_config, dict):
+                            # nothing to do
+                            agent_cfg_dict = agent_config
+                            pass
+
+                        elif isinstance(agent_config, basestring):
+                            try:
+                                if os.path.exists(agent_config):
+                                    # try to open as file name
+                                    logger.info("Read agent config file: %s" % agent_config)
+                                    agent_cfg_dict = ru.read_json(agent_config)
+                                else:
+                                    # otherwise interpret as a config name
+                                    # FIXME: load in session just like resource
+                                    #        configs, including user level overloads
+                                    module_path = os.path.dirname(os.path.abspath(__file__))
+                                    config_path = "%s/../configs/" % module_path
+                                    agent_cfg_file = os.path.join(config_path, "agent_%s.json" % agent_config)
+                                    logger.info("Read agent config file: %s" % agent_cfg_file)
+                                    agent_cfg_dict = ru.read_json(agent_cfg_file)
+                            except Exception as e:
+                                logger.exception("Error reading agent config file: %s" % e)
+
+                        else:
+                            # we can't handle this type
+                            raise TypeError('agent config must be string (filename) or dict')
+
+                        # TODO: use booleans all the way?
                         if stage_cacerts.lower() == 'true':
                             stage_cacerts = True
                         else:
                             stage_cacerts = False
-
 
                         # expand variables in virtenv string
                         virtenv = virtenv % {'pilot_sandbox' : saga.Url(pilot_sandbox).path,
@@ -608,18 +612,18 @@ class PilotLauncherWorker(threading.Thread):
                         if cleanup:                 bootstrap_args += " -x '%s'" % cleanup
 
                         # set some agent configuration
-                        agent_cfg['cores']              = number_cores
-                        agent_cfg['debug']              = logger.getEffectiveLevel() 
-                        agent_cfg['mongodb_url']        = str(agent_dburl)
-                        agent_cfg['lrms']               = lrms
-                        agent_cfg['spawner']            = agent_spawner
-                        agent_cfg['scheduler']          = agent_scheduler
-                        agent_cfg['runtime']            = runtime
-                        agent_cfg['pilot_id']           = pilot_id
-                        agent_cfg['session_id']         = session_id
-                        agent_cfg['agent_launch_method']= agent_launch_method
-                        agent_cfg['task_launch_method'] = task_launch_method
-                        agent_cfg['mpi_launch_method']  = mpi_launch_method
+                        agent_cfg_dict['cores']              = number_cores
+                        agent_cfg_dict['debug']              = logger.getEffectiveLevel() 
+                        agent_cfg_dict['mongodb_url']        = str(agent_dburl)
+                        agent_cfg_dict['lrms']               = lrms
+                        agent_cfg_dict['spawner']            = agent_spawner
+                        agent_cfg_dict['scheduler']          = agent_scheduler
+                        agent_cfg_dict['runtime']            = runtime
+                        agent_cfg_dict['pilot_id']           = pilot_id
+                        agent_cfg_dict['session_id']         = session_id
+                        agent_cfg_dict['agent_launch_method']= agent_launch_method
+                        agent_cfg_dict['task_launch_method'] = task_launch_method
+                        agent_cfg_dict['mpi_launch_method']  = mpi_launch_method
 
                         # ------------------------------------------------------
                         # Write agent config dict to a json file in pilot sandbox.
@@ -629,7 +633,7 @@ class PilotLauncherWorker(threading.Thread):
                         # Convert dict to json file
                         msg = "Writing agent configuration to file '%s'." % cf_tmp_file
                         logentries.append(Logentry (msg, logger=logger.debug))
-                        ru.write_json(agent_cfg, cf_tmp_file)
+                        ru.write_json(agent_cfg_dict, cf_tmp_file)
 
                         cf_env = saga.Url("%s/agent.0.cfg" % pilot_sandbox).path # this is what the pilot sees
                         cf_url = saga.Url("%s://localhost%s" % (LOCAL_SCHEME, cf_tmp_file))

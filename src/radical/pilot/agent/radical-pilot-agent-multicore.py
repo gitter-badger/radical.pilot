@@ -543,7 +543,7 @@ class AgentSchedulingComponent(rpu.Component):
         # FIXME: if allocation succeeded, then the unit will likely advance to
         #        executing soon.  Advance will do a blowup before puching -- but
         #        that will also *drop* units.  We need to unschedule those.
-        #        self.unschedule(cu_dropped), ad should probably do that right
+        #        self.unschedule(cu_dropped), and should probably do that right
         #        here?  Not sure if this is worth a dropping-hook on component
         #        level...
         return True
@@ -623,14 +623,14 @@ class AgentSchedulingComponent(rpu.Component):
         # straight away and move it to execution, or we have to
         # put it on the wait queue.
         if self._try_allocation(cu):
+            self._prof.prof('schedule', msg="allocation succeeded", uid=cu['_id'])
             self.advance(cu, rp.EXECUTING_PENDING, publish=True, push=True)
 
         else:
             # No resources available, put in wait queue
+            self._prof.prof('schedule', msg="allocation failed", uid=cu['_id'])
             with self._wait_lock :
                 self._wait_pool.append(cu)
-
-            self._prof.prof('schedule', msg="allocation failed", uid=cu['_id'])
 
 
 
@@ -1163,6 +1163,8 @@ class LaunchMethod(object):
         self.name = type(self).__name__
         self._cfg = cfg
         self._log = logger
+
+        self._prof = rpu.Profiler('launch_method.prof')
 
         self.launch_command = None
         self._configure()
@@ -2161,56 +2163,58 @@ class LRMS(object):
         self.lm_info         = dict()
         self.slot_list       = list()
         self.node_list       = list()
-        self.agent_nodes     = dict()
+        self.agent_nodes     = {}
         self.cores_per_node  = None
 
-        # the LRMS will need to reserve nodes for the agent, according to the
-        # agent layout.  We dig out the repsective requirements from the config
+        # The LRMS will possibly need to reserve nodes for the agent, according to the
+        # agent layout.  We dig out the respective requirements from the config
         # right here.
-        self._agent_reqs = set()  # using set will avoid duplicates
+        self._agent_reqs = []
         layout = self._cfg['agent_layout']
         for worker in layout:
             target = layout[worker].get('target')
-            # make sure that the target either 'local', which we will ignore, or
-            # 'agent_node[<n>]', for some integer 'n' >= 0
+            # make sure that the target either 'local', which we will ignore,
+            # or 'node'.
             if target == 'local':
                 pass # ignore that one
-            elif target.startswith('agent_node[') and \
-                 target.endswith(']') and \
-                 (int(target[11:-1]) >= 0) :
-                self._agent_reqs.add(target)
+            elif target == 'node':
+                self._agent_reqs.append(worker)
             else :
                 raise ValueError("ill-formatted agent target '%s'" % target)
 
-        # we are good to get rolling, and to detect the runtime environment of
-        # the local LRMS
+        # We are good to get rolling, and to detect the runtime environment of
+        # the local LRMS.
         self._configure()
         logger.info("Discovered execution environment: %s", self.node_list)
 
-        # make sure we got a valid nodelist and a valid setting for
+        # Make sure we got a valid nodelist and a valid setting for
         # cores_per_node
         if not self.node_list or self.cores_per_node < 1:
             raise RuntimeError('LRMS configuration invalid (%s)(%s)' % \
                     (self.node_list, self.cores_per_node))
 
-        # check if the LRMS implementation reserved agent nodes.  If not, pick
-        # the first couple of nodes from the nodelist as a fallback
-        if len(self._agent_reqs):
-            self._log.info('use fallback to determine set of agent nodes')
-            for ar in self._agent_reqs:
-                self.agent_nodes[ar] = self.node_list.pop()
+        # Check if the LRMS implementation reserved agent nodes.  If not, pick
+        # the first couple of nodes from the nodelist as a fallback.
+        if self._agent_reqs and not self.agent_nodes:
+            self._log.info('Determine list of agent nodes generically.')
+            for worker in self._agent_reqs:
+                # Get a node from the end of the node list
+                self.agent_nodes[worker] = self.node_list.pop()
+                # If all nodes are taken by workers now, we can safely stop,
+                # and let the raise below do its thing.
                 if not self.node_list:
                     break
 
         if self.agent_nodes:
-            self._log.info('reserved agent nodes: %s' % self.agent_nodes)
-            self._log.info('remaining work nodes: %s' % self.node_list)
+            self._log.info('Reserved agent nodes: %s' % self.agent_nodes.values())
+            self._log.info('Agent running on nodes: %s' % self.agent_nodes.keys())
+            self._log.info('Remaining work nodes: %s' % self.node_list)
 
-        # check if we can do any work
+        # Check if we can do any work
         if not self.node_list:
             raise RuntimeError('LRMS has no nodes left to run units')
 
-        # after LRMS configuration, we call any existing config hooks on the
+        # After LRMS configuration, we call any existing config hooks on the
         # launch methods.  Those hooks may need to adjust the LRMS settings
         # (hello ORTE).  We only call LM hooks *once*
         launch_methods = set() # set keeps entries unique
@@ -3489,8 +3493,8 @@ class AgentExecutingComponent(rpu.Component):
 
         try:
             impl = {
-                SPAWNER_NAME_POPEN : ExecWorker_POPEN,
-                SPAWNER_NAME_SHELL : ExecWorker_SHELL
+                SPAWNER_NAME_POPEN : AgentExecutingComponent_POPEN,
+                SPAWNER_NAME_SHELL : AgentExecutingComponent_SHELL
             }[name]
 
             impl = impl(cfg)
@@ -3503,7 +3507,7 @@ class AgentExecutingComponent(rpu.Component):
 
 # ==============================================================================
 #
-class ExecWorker_POPEN (AgentExecutingComponent) :
+class AgentExecutingComponent_POPEN (AgentExecutingComponent) :
 
     # --------------------------------------------------------------------------
     #
@@ -3626,7 +3630,7 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
             self._log.debug("Launching unit with %s (%s).", launcher.name, launcher.launch_command)
 
             assert(cu['opaque_slots']) # FIXME: no assert, but check
-            self._prof.prof('ExecWorker unit launch', uid=cu['_id'])
+            self._prof.prof('exec', msg='unit launch', uid=cu['_id'])
 
             # Start a new subprocess to launch the unit
             self.spawn(launcher=launcher, cu=cu)
@@ -3651,7 +3655,7 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
     #
     def spawn(self, launcher, cu):
 
-        self._prof.prof('ExecWorker spawn', uid=cu['_id'])
+        self._prof.prof('spawn', msg='unit spawn', uid=cu['_id'])
 
         launch_script_name = '%s/radical_pilot_cu_launch_script.sh' % cu['workdir']
         self._log.debug("Created launch_script: %s", launch_script_name)
@@ -3715,7 +3719,7 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
                 if hop_cmd : cmdline = hop_cmd
                 else       : cmdline = launch_script_name
 
-                self._prof.prof('launch script constructed', uid=cu['_id'])
+                self._prof.prof('command', msg='launch script constructed', uid=cu['_id'])
 
             except Exception as e:
                 msg = "Error in spawner (%s)" % e
@@ -3777,10 +3781,11 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
     #
     def _watch(self):
 
+        cname = self.name.replace('Component', 'Watcher')
+        self._prof = rpu.Profiler(cname)
         self._prof.prof('run')
         try:
-            self._log = ru.get_logger('%s.Watcher' % self.name, 
-                                      target="%s.Watcher.log" % self.name,
+            self._log = ru.get_logger(cname, target="%s.log" % cname,
                                       level='DEBUG') # FIXME?
 
             while not self._terminate.is_set():
@@ -3860,7 +3865,7 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
                     self.advance(cu, rp.CANCELED, publish=True, push=False)
 
             else:
-                self._prof.prof('execution complete', uid=cu['_id'])
+                self._prof.prof('exec', 'execution complete', uid=cu['_id'])
 
                 # we have a valid return code -- unit is final
                 action += 1
@@ -3904,7 +3909,7 @@ class ExecWorker_POPEN (AgentExecutingComponent) :
 
 # ==============================================================================
 #
-class ExecWorker_SHELL(AgentExecutingComponent):
+class AgentExecutingComponent_SHELL(AgentExecutingComponent):
 
 
     # --------------------------------------------------------------------------
@@ -3991,6 +3996,7 @@ class ExecWorker_SHELL(AgentExecutingComponent):
         self._watcher   = threading.Thread(target=self._watch, name="Watcher")
         self._watcher.start ()
 
+        self._prof.prof('run setup done')
 
         # FIXME: 
         #
@@ -4100,7 +4106,7 @@ class ExecWorker_SHELL(AgentExecutingComponent):
             self._log.debug("Launching unit with %s (%s).", launcher.name, launcher.launch_command)
 
             assert(cu['opaque_slots']) # FIXME: no assert, but check
-            self._prof.prof('ExecWorker unit launch', uid=cu['_id'])
+            self._prof.prof('exec', msg='unit launch', uid=cu['_id'])
 
             # Start a new subprocess to launch the unit
             self.spawn(launcher=launcher, cu=cu)
@@ -4251,14 +4257,14 @@ timestamp () {
 
         uid = cu['_id']
 
-        self._prof.prof('ExecWorker spawn', uid=uid)
+        self._prof.prof('spawn', msg='unit spawn', uid=uid)
 
         # we got an allocation: go off and launch the process.  we get
         # a multiline command, so use the wrapper's BULK/LRUN mode.
         cmd       = self._cu_to_cmd (cu, launcher)
         run_cmd   = "BULK\nLRUN\n%s\nLRUN_EOT\nBULK_RUN\n" % cmd
 
-        self._prof.prof('launch script constructed', uid=cu['_id'])
+        self._prof.prof('command', msg='launch script constructed', uid=cu['_id'])
 
       # TODO: Remove this commented out block?
       # if  self.lrms.target_is_macos :
@@ -4293,12 +4299,12 @@ timestamp () {
             raise RuntimeError ("failed to run unit '%s': (%s)(%s)" \
                              % (run_cmd, ret, out))
 
-        self._prof.prof('spawning passed to pty', uid=uid)
+        self._prof.prof('spawn', msg='spawning passed to pty', uid=uid)
 
         # FIXME: this is too late, there is already a race with the monitoring
         # thread for this CU execution.  We need to communicate the PIDs/CUs via
         # a queue again!
-        self._prof.prof('put', msg="ExecWorker to watcher (%s)" % cu['state'], uid=cu['_id'])
+        self._prof.prof('put', msg="to watcher (%s)" % cu['state'], uid=cu['_id'])
         with self._registry_lock :
             self._registry[pid] = cu
 
@@ -4307,13 +4313,15 @@ timestamp () {
     #
     def _watch (self) :
 
+        cname = self.name.replace('Component', 'Watcher')
+        self._prof = rpu.Profiler(cname)
+
         MONITOR_READ_TIMEOUT = 1.0   # check for stop signal now and then
         static_cnt           = 0
 
         self._prof.prof('run')
         try:
-            self._log = ru.get_logger('%s.Watcher' % self.name, 
-                                      target="%s.Watcher.log" % self.name,
+            self._log = ru.get_logger(cname, target="%s.log" % cname,
                                       level='DEBUG') # FIXME?
             self.monitor_shell.run_async ("MONITOR")
 
@@ -4523,9 +4531,9 @@ class AgentUpdateWorker(rpu.Worker):
             uid   = entry[0]
             state = entry[1]
             if state:
-                self._prof.prof('unit update pushed (%s)' % state, uid=uid)
+                self._prof.prof('update', msg='unit update pushed (%s)' % state, uid=uid)
             else:
-                self._prof.prof('unit update pushed', uid=uid)
+                self._prof.prof('update', msg='unit update pushed', uid=uid)
 
         cinfo['last'] = now
         cinfo['bulk'] = None
@@ -4606,11 +4614,10 @@ class AgentUpdateWorker(rpu.Worker):
                 cinfo['uids'].append([uid, state])
                 cinfo['bulk'].find  (query_dict) \
                              .update(update_dict)
+                self._prof.prof('bulk', msg='bulked (%s)' % state, uid=uid)
 
                 # attempt a timed update
                 self._timed_bulk_execute(cinfo)
-                self._prof.prof('unit update bulked (%s)' % state, uid=uid)
-
 
         except Exception as e:
             self._log.exception("unit update failed (%s)", e)
@@ -4940,7 +4947,6 @@ class AgentHeartbeatWorker(rpu.Worker):
             self.publish('command', {'cmd' : 'shutdown', 
                                      'arg' : 'exception'})
 
-
     # --------------------------------------------------------------------------
     #
     def _check_commands(self):
@@ -5152,12 +5158,15 @@ class AgentWorker(rpu.Worker):
         ret = list()
         for sa in sub_agents:
             target = self._cfg['agent_layout'][sa]['target']
-            node   = self._cfg['lrms_info']['agent_nodes'].get(target)
 
-            if not node :
+            if target == 'local':
+
                 # start agent locally
                 cmd = "/bin/sh %s/bootstrap_2.sh %s" % (os.getcwd(), sa)
-            else:
+
+            elif target == 'node':
+
+                node = self._cfg['lrms_info']['agent_nodes'].get(sa)
                 # start agent remotely, use launch method
                 # NOTE:  there is some implicit assumption that we can use
                 #        the 'agent_node' string as 'agent_string:0' and
@@ -5457,12 +5466,14 @@ def bootstrap_3():
             # and the sub_agent will pick its own layout section -- but in principle
             # this is also the point where we would make individual config changes.
 
-            # dig oput bridges from all sub-agents (sa)
+            # dig out bridges from all sub-agents (sa)
             bridge_addresses = dict()
             for sa in cfg['agent_layout']:
 
-                target = cfg['agent_layout'][sa]['target']
-                node   = cfg['lrms_info']['agent_nodes'].get(target)
+                # FIXME: we should point the address to the node of the subagent
+                #        which hosts the bridge, not the local IP.  Until this
+                #        is fixed, bridges MUST run on agent.0 (which is what
+                #        LRMS.hostip() below will point to).
                 nodeip = LRMS.hostip()
 
                 # we should have at most one bridge for every type

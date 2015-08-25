@@ -103,6 +103,8 @@ class UnitManager(rpu.Component):
         self._uid = ru.generate_id('umgr')
         self._log = ru.get_logger(self.uid, "%s.%s.log" % (session.uid, self._uid))
 
+        self._session.prof.prof('create umgr', uid=self._uid)
+
         # FIXME: we want to have a config with, for example, wait_poll_timeout.
         #        This config should be defined as config file, not inlined as it
         #        is right now
@@ -119,6 +121,10 @@ class UnitManager(rpu.Component):
             if scheduler:
                 # overwrite the scheduler from the config file
                 cfg['scheduler'] = scheduler
+
+            if not cfg.get('scheduler'):
+                # set default scheduler of needed
+                cfg['scheduler'] = SCHED_DEFAULT
 
             bridges    = cfg.get('bridges',    [])
             components = cfg.get('components', [])
@@ -173,6 +179,7 @@ class UnitManager(rpu.Component):
             self._log.info("closing bridge %s", b._name)
             b.close()
 
+        self._session.prof.prof('closed umgr', uid=self._uid)
         logger.info("Closed UnitManager %s." % str(self._uid))
 
         self._valid = False
@@ -352,7 +359,8 @@ class UnitManager(rpu.Component):
     # -------------------------------------------------------------------------
     #
     def get_units(self, uids=None):
-        """Returns one or more compute units identified by their IDs.
+        """
+        Returns one or more compute units identified by their IDs.
 
         **Arguments:**
 
