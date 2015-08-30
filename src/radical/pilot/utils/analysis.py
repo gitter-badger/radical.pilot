@@ -3,38 +3,78 @@ import os
 
 from ..states import *
 
-_info_prefix = {
+info_names = {
         'AgentWorker'                 : 'awo',
         'AgentStagingInputComponent'  : 'asic',
         'SchedulerContinuous'         : 'asc',  # agent scheduler component
         'AgentExecutingComponent'     : 'aec',
-        'AgentExecutingWatcher'       : 'aew',
+        'AgentExecutingWatcher'       : 'aec',
         'AgentStagingOutputComponent' : 'asoc',
         'session'                     : 'mod'
         }
 
 _info_events = {
-        'get'        : 'get_u',     # get a unit from a queue
-        'work start' : 'work_u',    # unit is handed over to component
-        'work done'  : 'worked_u',  # component finished to operate on unit
-        'put'        : 'put_u',     # unit is put onto the next queue
-        'publish'    : 'pub_u',     # unit state is published via some pubsub
-        'advance'    : 'adv_u',     # the unit state is advanced
-        'update'     : 'upd_u'      # a unit state update is pushed to the DB
+        'get'        : '_get_u',     # get a unit from a queue
+        'work start' : '_work_u',    # unit is handed over to component
+        'work done'  : '_worked_u',  # component finished to operate on unit
+        'put'        : '_put_u',     # unit is put onto the next queue
+        'publish'    : '_pub_u',     # unit state is published via some pubsub
+        'advance'    : '_adv_u',     # the unit state is advanced
+        'update'     : '_upd_u'      # a unit state update is pushed to the DB
         }
+
+_info_pending = {
+        'Pending'    : '_pend'
+        }
+
+_info_states = [
+        ACTIVE,
+        AGENT_STAGING_INPUT,
+        AGENT_STAGING_INPUT_PENDING,
+        AGENT_STAGING_OUTPUT,
+        AGENT_STAGING_OUTPUT_PENDING,
+        ALLOCATING,
+        ALLOCATING_PENDING,
+        CANCELED,
+        DONE,
+        EXECUTING,
+        EXECUTING_PENDING,
+        FAILED,
+        LAUNCHING,
+        NEW,
+        PENDING,
+        PENDING_ACTIVE,
+        PENDING_EXECUTION,
+        PENDING_INPUT_STAGING,
+        PENDING_LAUNCH,
+        PENDING_OUTPUT_STAGING,
+        SCHEDULING,
+        STAGING_INPUT,
+        STAGING_OUTPUT,
+        UNSCHEDULED
+        ]
 
 _info_entries = [
     # FIXME: the names below will break for other schedulers
-    ('asc_alloc_nok', 'SchedulerContinuous',      'schedule', 'allocation failed'),
-    ('asc_alloc_ok',  'SchedulerContinuous',      'schedule', 'allocation succeeded'),
-    ('asc_unqueue',   'SchedulerContinuous',      'unqueue',  're-allocation done'),
-  
-    ('aec_launch',    'AgentExecutingComponent',  'exec',     'unit launch'),
-    ('aec_spawn',     'AgentExecutingComponent',  'spawn',    'unit spawn'),
-    ('aec_script',    'AgentExecutingComponent',  'command',  'launch script constructed'),
-    ('aec_pty',       'AgentExecutingComponent',  'spawn',    'spawning passed to pty'),  
-  
-    ('aew_complete',  'AgentExecutingWatcher',    'exec',     'execution complete'),
+    ('umgr_get_u',      'MainThread',             'advance',   'New'),
+    ('umgr_adv_u_pend', 'MainThread',             'advance',   'PendingInputStaging'),
+    ('usic_get_u',      'InputFileTransfer',      'advance',   'StagingInput'),
+    ('usic_adv_u_pend', 'InputFileTransfer',      'advance',   'AgentStagingInputPending'),
+
+    ('usoc_get_u',      'OutputFileTransfer',     'advance',   'StagingOutput'),
+    ('usoc_adv_u',      'OutputFileTransfer',     'advance',   'Done'),
+
+    ('asc_alloc_nok',   'SchedulerContinuous',    'schedule',  'allocation failed'),
+    ('asc_alloc_ok',    'SchedulerContinuous',    'schedule',  'allocation succeeded'),
+    ('asc_unqueue',     'SchedulerContinuous',    'unqueue',   're-allocation done'),
+
+    ('aec_launch',      'AgentExecuting',         'exec',      'unit launch'),
+    ('aec_spawn',       'AgentExecuting',         'spawn',     'unit spawn'),
+    ('aec_script',      'AgentExecuting',         'command',   'launch script constructed'),
+    ('aec_pty',         'AgentExecuting',         'spawn',     'spawning passed to pty'),  
+    ('aec_end',         'AgentExecuting',         'final',     ''),  
+
+    ('aew_complete',    'AgentExecuting',         'exec',      'execution complete'),
 ]
 
 # ------------------------------------------------------------------------------
@@ -42,10 +82,10 @@ _info_entries = [
 tmp = None
 def add_concurrency (frame, tgt, spec):
     """
-    add a column 'tgt' which is a cumulative sum of conditionals of enother row.  
+    add a column 'tgt' which is a cumulative sum of conditionals of another row.
     
     The purpose is the following: if a unit enters a component, the tgt row counter is 
-    increased by 1, if the unit leaves the component, the counter is decreases by 1.
+    increased by 1, if the unit leaves the component, the counter is decreased by 1.
     For any time, the resulting row contains the number of units which is in the 
     component.  Or state.  Or whatever.
     
@@ -401,21 +441,99 @@ def add_info(df):
 
     # --------------------------------------------------------------------------
     def _info (row):
-        for pat, pre in _info_prefix.iteritems():
-            if pat in row['name']:
-                for pat, post in _info_events.iteritems():
-                    if pat == row['event']:
-                        return "%s_%s" % (pre, post)
-                break
         for info, name, event, msg in _info_entries:
-            if  row['name'] and name  in row['name'] and \
-                event == row['event'] and \
-                msg   == row['msg']:
+            if  (row['name'] and name  in row['name'] ) and \
+                (not event   or  event == row['event']) and \
+                (not msg     or  msg   == row['msg']  ):
                 return info
-        return np.NaN
+
+        ret = ""
+        n   = 0  # 
+        for pat, pre in info_names.iteritems():
+            if pat in row['name']:
+                ret += pre
+                n   += 1
+                break
+        for pat, ev in _info_events.iteritems():
+            if ret and pat == row['event']:
+                ret += ev
+                n   += 1
+                break
+        for pat, s in _info_pending.iteritems():
+            if ret and pat in row['state']:
+                ret += s
+                break
+
+        if ret and n >= 2:
+            return ret
+        else:
+            return np.NaN
     # --------------------------------------------------------------------------
     df['info'] = df.apply(lambda row: _info (row), axis=1)
     
+
+# ------------------------------------------------------------------------------
+#
+def get_info_df(df):
+    """
+    This call will convert a raw profiling frame into a transposed frame where
+    possible info tags are columns, and each row contains the respective timings
+    for uni unit.  uid is df index.
+    """
+
+    import pandas as pd
+
+    uids  = list(df['uid'].unique())
+    cols  = set()
+    dicts = dict()
+
+    for uid in uids:
+        uf_n  = df[df['uid'] == uid]
+        tmp1   = uf_n[['time', 'info']].dropna()
+        tmp1_d = tmp1.set_index('info').to_dict()['time']
+
+        # add state transitions to dict.  We basically select all rows with
+        # a 'state_from', and add a dict entry for the 'state' column.
+        # Make sure we ignore transitions where 'state' == 'state_from'.
+        tmp2   = uf_n[uf_n['state_from'].notnull()]
+        tmp3   = tmp2[tmp2['state'] != tmp2['state_from']]
+        tmp4   = tmp3[['time', 'state']].dropna()
+        tmp2_d = tmp4.set_index('state').to_dict()['time']
+        for k,v in tmp2_d.iteritems():
+            tmp1_d[k] = v
+        # make sure the frame column headers are complete
+        for s in _info_states:
+            cols.add(s)
+
+        # make sure we got no info double defined on any unit.  Also derive
+        # column names
+        l = list(uf_n['info'].dropna())
+        for i in set(l):
+            cols.add(i)
+            if l.count(i)>1:
+                raise ValueError('doubled info entry %s' % i)
+
+        dicts[uid] = tmp1_d
+
+
+    new_df = pd.DataFrame(columns=cols, index=uids)
+    for uid in dicts:
+        new_df.loc[uid] = pd.Series(dicts[uid])
+
+    return new_df
+
+
+# ------------------------------------------------------------------------------
+#
+def get_state_df(df):
+    """
+    This call accepts an 'info' df, and reduces it to only contain state
+    transitions.
+    """
+
+    return df[_info_states]
+
+
 # ------------------------------------------------------------------------------
 #
 def add_states(df):
