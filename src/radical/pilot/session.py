@@ -240,7 +240,7 @@ class Session (saga.Session, Object):
 
 
             except Exception, ex:
-                logger.exception ('session create failed')
+                logger.exception("session create failed with '%s' for '%s'", ex, self._database_url)
                 raise PilotException("Couldn't create new session (database URL '%s' incorrect?): %s" \
                                 % (self._database_url, ex))  
 
