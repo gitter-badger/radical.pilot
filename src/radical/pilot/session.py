@@ -247,16 +247,18 @@ class Session (saga.Session, Object):
         ######################################
         else:
             try:
-                self._uid = uid
 
                 # otherwise, we reconnect to an existing session
                 self._dbs, session_info, self._connection_info = \
-                        dbSession.reconnect(sid     = self._uid, 
+                        dbSession.reconnect(sid     = uid,
                                             db_url  = self._database_url,
                                             db_name = self._database_name)
 
                 self._created   = session_info["created"]
                 self._connected = session_info["connected"]
+
+                # from here on the session can be closed again
+                self._uid = uid
 
                 logger.info("Reconnected to existing Session %s." % str(self))
 
