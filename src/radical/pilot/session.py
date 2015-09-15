@@ -212,10 +212,9 @@ class Session (saga.Session, Object):
 
                 if name :
                     self._name = name
-                    self._uid  = name
-                  # self._uid  = ru.generate_id ('rp.session.'+name+'.%(item_counter)06d', mode=ru.ID_CUSTOM)
+                    uid  = name
                 else :
-                    self._uid  = ru.generate_id ('rp.session', mode=ru.ID_PRIVATE)
+                    uid  = ru.generate_id ('rp.session', mode=ru.ID_PRIVATE)
                     self._name = self._uid
 
 
@@ -224,6 +223,9 @@ class Session (saga.Session, Object):
                                       name    = self._name,
                                       db_url  = self._database_url,
                                       db_name = self._database_name)
+
+                # from here on the session can be closed again
+                self._uid = uid
 
                 logger.info("New Session created %s." % str(self))
 
