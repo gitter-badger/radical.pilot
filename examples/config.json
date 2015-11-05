@@ -6,6 +6,12 @@
             "schema"   : null
         },
 
+        "radical.sc15" : {
+            "project"  : null,
+            "queue"    : null,
+            "schema"   : "local"
+        },
+
         "ncsa.bw" : {
             "project"  : "gkd",
             "queue"    : "debug",
