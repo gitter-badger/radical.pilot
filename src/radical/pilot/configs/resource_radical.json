@@ -1,4 +1,3 @@
-
 {
     "tutorial": {
         "description"                 : "Our private tutorial VM on EC2",
@@ -28,6 +27,33 @@
         "rp_version"                  : "local",
         "virtenv"                     : "%(global_sandbox)s/ve_tutorial",
         "virtenv_mode"                : "update"
+    },
+    "sc15": {
+        "description"                 : "SC15 Tutorial Chameleon Cluster.",
+        "notes"                       : "Can be either used remotely using ssh or locally.",
+        "schemas"                     : ["ssh", "local"],
+        "ssh"                         :
+        {
+            "job_manager_endpoint"    : "ssh://sc15.radical-cybertools.org/",
+            "filesystem_endpoint"     : "sftp://sc15.radical-cybertools.org/"
+        },
+        "local"                       :
+        {
+            "job_manager_endpoint"    : "fork://localhost/",
+            "filesystem_endpoint"     : "file://localhost/"
+        },
+        "default_remote_workdir"      : "$HOME",
+        "lrms"                        : "FORK",
+        "agent_type"                  : "multicore",
+        "agent_scheduler"             : "CONTINUOUS",
+        "agent_spawner"               : "POPEN",
+        "agent_launch_method"         : "FORK",
+        "task_launch_method"          : "SSH",
+        "mpi_launch_method"           : "MPIEXEC",
+        "pre_bootstrap_1"             : ["export RADICAL_PILOT_FORK_LRMS_NODES=localhost,localhost"],
+        "cores_per_node"              : "4",
+        "rp_version"                  : "debug",
+        "virtenv"                     : "%(global_sandbox)s/ve_sc15",
+        "virtenv_mode"                : "create"
     }
 }
-
